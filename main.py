@@ -1,0 +1,335 @@
+import streamlit as st
+import pandas as pd
+import requests
+# from pages.Usage_Prep_Tool import *
+# from helper.data import *
+# from helper.graphs import *
+# from helper.tabs_api import *
+import time
+import re
+from datetime import datetime
+from api import *
+from usage_transformation import (
+    price_book_transformation,
+    tabs_billing_terms_format,
+    tabs_billing_terms_to_upload,
+    enterprise_support,
+    prepaid,
+    create_contracts,
+    create_invoices,
+    create_tabs_ready_usage
+)
+
+# Page configuration
+st.set_page_config(
+    page_title="Alkira Usage Transformation App",
+    page_icon="🏍️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Initialize API key from secrets
+if 'tabs_api_key' not in st.session_state:
+    try:
+        st.session_state['tabs_api_key'] = st.secrets['tabs_api_key']
+    except KeyError:
+        st.error("API key not found in secrets.toml")
+        st.stop()
+
+# Main app
+def main():
+    st.title("🏍️ Alkira Usage Uploader")
+    st.markdown("---")
+    
+    # Main content area
+    st.header("Usage Transformation")
+    st.write("This is a custom built app for Alkira's Usage Billing. Upload the required files to process usage transformation. Complete all steps before clicking the Process Files button and do not click the button repeatedly!")
+    st.write(" Contact your Tabs account manager via Slack if you have any questions.")
+
+    # Billing run date input with button submission
+    st.markdown("---")
+    st.subheader("Billing Run Date")
+    billing_date_input = st.text_input(
+        "Enter Service Period Start Date for the Usage Billing (YYYY-MM-DD)",
+        value=st.session_state.get('billing_run_date', ''),
+        key="billing_date_input",
+        help="Enter the billing run date in YYYY-MM-DD format (e.g., 2024-01-15)",
+        placeholder="YYYY-MM-DD"
+    )
+    if st.button("Submit Billing Run Date", key="submit_billing_date", type="primary"):
+        if billing_date_input:
+            # Validate date format
+            date_pattern = r'^\d{4}-\d{2}-\d{2}$'
+            if re.match(date_pattern, billing_date_input):
+                try:
+                    # Validate that it's a valid date
+                    datetime.strptime(billing_date_input, '%Y-%m-%d')
+                    st.session_state['billing_run_date'] = billing_date_input
+                    st.success(f"✓ Billing Run Date set to: {billing_date_input}")
+                except ValueError:
+                    st.error("Invalid date. Please enter a valid date in YYYY-MM-DD format.")
+            else:
+                st.error("Invalid format. Please enter the date in YYYY-MM-DD format (e.g., 2024-01-15).")
+        else:
+            st.warning("Please enter a billing run date before submitting.")
+    
+    # Display current billing run date if set
+    if st.session_state.get('billing_run_date'):
+        st.info(f"Current Billing Run Date: **{st.session_state['billing_run_date']}**")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("1. Price Book ZIP")
+        price_book_file = st.file_uploader(
+            "Upload Price Book ZIP file",
+            type=['zip'],
+            key="price_book",
+            help="Upload the Price Book ZIP file"
+        )
+        if price_book_file is not None:
+            st.success(f"✓ Uploaded: {price_book_file.name}")
+            st.session_state['price_book_file'] = price_book_file
+            
+            # Process the zip file to extract customer IDs
+            # Get billing_run_date from session state if available
+            billing_run_date = st.session_state.get('billing_run_date', None)
+            # Check if we need to reprocess: new file, different file name, or billing_run_date changed
+            last_billing_date = st.session_state.get('last_billing_run_date_used', None)
+            needs_reprocess = (
+                'price_book_data' not in st.session_state or 
+                st.session_state.get('price_book_file_name') != price_book_file.name or
+                last_billing_date != billing_run_date
+            )
+            if needs_reprocess:
+                with st.spinner("Extracting customer IDs from ZIP file..."):
+                    customer_files = price_book_transformation(price_book_file, billing_run_date)
+                    st.session_state['price_book_data'] = customer_files
+                    st.session_state['price_book_file_name'] = price_book_file.name
+                    st.session_state['last_billing_run_date_used'] = billing_run_date
+            
+            # Display errors if any
+            if st.session_state.get('price_book_data') and 'errors' in st.session_state['price_book_data']:
+                errors = st.session_state['price_book_data']['errors']
+                if errors:
+                    with st.expander(f"⚠️ Processing Errors ({len(errors)} error(s))", expanded=True):
+                        for error in errors:
+                            st.error(error)
+            
+            # Display extracted customer IDs
+            if st.session_state.get('price_book_data'):
+                # Filter out 'combined', 'filtered', and 'errors' keys to get actual customer IDs
+                customer_ids = [k for k in st.session_state['price_book_data'].keys() 
+                              if k not in ['combined', 'filtered', 'errors']]
+                if customer_ids:
+                    st.info(f"Found {len(customer_ids)} customer(s): {', '.join(sorted(customer_ids, key=int))}")
+    
+    with col2:
+        st.subheader("2. Alkira Raw Monthly Usage")
+        raw_monthly_usage_file = st.file_uploader(
+            "Upload Raw Monthly Usage file",
+            type=['csv', 'xlsx', 'xls'],
+            key="raw_monthly_usage",
+            help="Upload the Raw Monthly Usage file"
+        )
+        if raw_monthly_usage_file is not None:
+            st.success(f"✓ Uploaded: {raw_monthly_usage_file.name}")
+            st.session_state['raw_monthly_usage_file'] = raw_monthly_usage_file
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        st.subheader("3. Enterprise Support Customers")
+        enterprise_support_file = st.file_uploader(
+            "Upload Enterprise Support file",
+            type=['csv', 'xlsx', 'xls'],
+            key="enterprise_support",
+            help="Upload the Enterprise Support file"
+        )
+        if enterprise_support_file is not None:
+            st.success(f"✓ Uploaded: {enterprise_support_file.name}")
+            st.session_state['enterprise_support_file'] = enterprise_support_file
+    
+    with col4:
+        st.subheader("4. Prepaid Customers")
+        prepaid_file = st.file_uploader(
+            "Upload Prepaid file",
+            type=['csv', 'xlsx', 'xls'],
+            key="prepaid",
+            help="Upload the Prepaid file"
+        )
+        if prepaid_file is not None:
+            st.success(f"✓ Uploaded: {prepaid_file.name}")
+            st.session_state['prepaid_file'] = prepaid_file
+    
+    # Process button
+    st.markdown("---")
+    if st.button("Process Files", type="primary"):
+        # Check if price book file is uploaded (required)
+        if not st.session_state.get('price_book_file'):
+            st.error("Please upload a Price Book ZIP file to process.")
+        elif not st.session_state.get('billing_run_date'):
+            st.warning("Please set a Billing Run Date before processing.")
+        else:
+            # Get billing_run_date from session state
+            billing_run_date = st.session_state.get('billing_run_date')
+            
+            # Get uploaded files
+            price_book_file = st.session_state.get('price_book_file')
+            raw_monthly_usage_file = st.session_state.get('raw_monthly_usage_file')
+            enterprise_support_file = st.session_state.get('enterprise_support_file')
+            prepaid_file = st.session_state.get('prepaid_file')
+            
+            # Initialize result storage
+            results = {}
+            errors = []
+            
+            try:
+                # Step 1: Process Price Book ZIP
+                with st.spinner("Step 1/7: Processing Price Book ZIP file..."):
+                    customer_files = price_book_transformation(price_book_file, billing_run_date)
+                    
+                    if 'errors' in customer_files and customer_files['errors']:
+                        errors.extend(customer_files['errors'])
+                    
+                    if 'filtered' not in customer_files or customer_files['filtered'].empty:
+                        st.error("Failed to process Price Book ZIP file. No filtered data available.")
+                    else:
+                        filtered_df = customer_files['filtered']
+                        st.success(f"✓ Step 1: Processed Price Book ZIP ({len(filtered_df)} rows)")
+                        results['filtered_df'] = filtered_df
+                        
+                        # Step 2: Filter with Raw Monthly Usage (if uploaded)
+                        tabs_bt_clean_df = filtered_df
+                        if raw_monthly_usage_file:
+                            with st.spinner("Step 2/7: Filtering with Raw Monthly Usage file..."):
+                                # Reset file pointer in case it was read before
+                                raw_monthly_usage_file.seek(0)
+                                tabs_bt_clean_df = tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file)
+                                st.success(f"✓ Step 2: Filtered with Raw Monthly Usage ({len(tabs_bt_clean_df)} rows)")
+                        else:
+                            st.info("Step 2: Skipped (Raw Monthly Usage file not uploaded)")
+                        
+                        # Step 3: Add Enterprise Support (if uploaded)
+                        tabs_bt_enterprise = tabs_bt_clean_df
+                        if enterprise_support_file:
+                            with st.spinner("Step 3/7: Adding Enterprise Support rows..."):
+                                tabs_bt_enterprise = enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_date)
+                                st.success(f"✓ Step 3: Added Enterprise Support rows ({len(tabs_bt_enterprise)} rows)")
+                        else:
+                            st.info("Step 3: Skipped (Enterprise Support file not uploaded)")
+                        
+                        # Step 4: Add Prepaid (if uploaded)
+                        tabs_bt_prepaid_enterprise = tabs_bt_enterprise
+                        if prepaid_file:
+                            with st.spinner("Step 4/7: Adding Prepaid rows..."):
+                                tabs_bt_prepaid_enterprise = prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date)
+                                st.success(f"✓ Step 4: Added Prepaid rows ({len(tabs_bt_prepaid_enterprise)} rows)")
+                        else:
+                            st.info("Step 4: Skipped (Prepaid file not uploaded)")
+                        
+                        # Step 5: Create Contracts
+                        with st.spinner("Step 5/7: Creating contracts..."):
+                            tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise)
+                            contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
+                            st.success(f"✓ Step 5: Created contracts ({contracts_created} contracts)")
+                        
+                        # Step 6: Create Invoices
+                        with st.spinner("Step 6/7: Creating invoices and pushing to API..."):
+                            invoices_result = create_invoices(tabs_bt_contract)
+                            success_count = (invoices_result['push_status'] == 'SUCCESS').sum() if 'push_status' in invoices_result.columns else 0
+                            st.success(f"✓ Step 6: Created invoices ({success_count} successful)")
+                            results['invoices_result'] = invoices_result
+                        
+                        # Step 7: Create Tabs Ready Usage (if raw_monthly_usage_file uploaded)
+                        usage_output = None
+                        if raw_monthly_usage_file:
+                            with st.spinner("Step 7/7: Creating Tabs Ready Usage file..."):
+                                # Reset file pointer in case it was read before
+                                raw_monthly_usage_file.seek(0)
+                                if enterprise_support_file:
+                                    enterprise_support_file.seek(0)
+                                usage_output = create_tabs_ready_usage(
+                                    raw_monthly_usage_file, 
+                                    tabs_bt_contract, 
+                                    enterprise_support_file, 
+                                    billing_run_date
+                                )
+                                if not usage_output.empty:
+                                    st.success(f"✓ Step 7: Created Tabs Ready Usage ({len(usage_output)} rows)")
+                                    results['usage_output'] = usage_output
+                                else:
+                                    st.warning("Step 7: Usage output is empty")
+                        else:
+                            st.info("Step 7: Skipped (Raw Monthly Usage file not uploaded)")
+                        
+                        # Store results in session state
+                        st.session_state['processing_results'] = results
+                        st.session_state['processing_errors'] = errors
+                        
+                        # Display errors if any
+                        if errors:
+                            with st.expander(f"⚠️ Processing Errors ({len(errors)} error(s))", expanded=False):
+                                for error in errors:
+                                    st.error(error)
+                        
+                        # Display success message
+                        st.success("✅ Processing completed successfully!")
+            
+            except Exception as e:
+                st.error(f"Error during processing: {str(e)}")
+                import traceback
+                st.code(traceback.format_exc())
+    
+    # Display CSV outputs if processing was completed
+    if st.session_state.get('processing_results'):
+        st.markdown("---")
+        st.subheader("📥 Download Output Files")
+        results = st.session_state['processing_results']
+        
+        # Billing Terms CSV
+        if 'invoices_result' in results:
+            invoices_df = results['invoices_result']
+            if not invoices_df.empty:
+                st.markdown("### Billing Terms CSV")
+                st.info(f"Rows: {len(invoices_df)} | Columns: {len(invoices_df.columns)}")
+                
+                # Convert to CSV
+                csv_billing = invoices_df.to_csv(index=False)
+                
+                # Display preview
+                with st.expander("Preview Billing Terms Data"):
+                    st.dataframe(invoices_df.head(20))
+                
+                # Download button
+                st.download_button(
+                    label="Download Billing Terms CSV",
+                    data=csv_billing,
+                    file_name="billing_terms.csv",
+                    mime="text/csv"
+                )
+        
+        # Usage CSV
+        if 'usage_output' in results:
+            usage_df = results['usage_output']
+            if not usage_df.empty:
+                st.markdown("### Usage CSV")
+                st.info(f"Rows: {len(usage_df)} | Columns: {len(usage_df.columns)}")
+                
+                # Convert to CSV
+                csv_usage = usage_df.to_csv(index=False)
+                
+                # Display preview
+                with st.expander("Preview Usage Data"):
+                    st.dataframe(usage_df.head(20))
+                
+                # Download button
+                st.download_button(
+                    label="Download Usage CSV",
+                    data=csv_usage,
+                    file_name="tabs_ready_usage.csv",
+                    mime="text/csv"
+                )
+ 
+if __name__ == "__main__":
+    main()
