@@ -28,13 +28,75 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize API key from secrets
-if 'tabs_api_key' not in st.session_state:
+def check_api_key(api_key):
+    """
+    Validate API key by making a test API call.
+    
+    Args:
+        api_key: The API key to validate
+        
+    Returns:
+        bool: True if API key is valid, False otherwise
+    """
+    if not api_key or not api_key.strip():
+        return False
+    
     try:
-        st.session_state['tabs_api_key'] = st.secrets['tabs_api_key']
-    except KeyError:
-        st.error("API key not found in secrets.toml")
-        st.stop()
+        # Use a lightweight endpoint that doesn't require parameters
+        # Using /v3/events/types which is already used successfully in the codebase
+        url = "https://integrators.prod.api.tabsplatform.com/v3/events/types?limit=1"
+        headers = {
+            "Authorization": api_key.strip()
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        # Accept any 2xx status code as success
+        is_valid = 200 <= response.status_code < 300
+        if not is_valid:
+            # Debug: print the actual status code and response for troubleshooting
+            print(f"API key validation failed: Status {response.status_code}")
+            try:
+                error_data = response.json()
+                print(f"Response: {error_data}")
+            except:
+                print(f"Response text: {response.text[:200]}")
+        return is_valid
+    except Exception as e:
+        # Debug: print the exception for troubleshooting
+        print(f"API key validation exception: {str(e)}")
+        return False
+
+def show_authentication():
+    """Display authentication screen for API key input."""
+    st.title("🔐 Alkira Usage Uploader - Authentication")
+    st.markdown("---")
+    
+    st.info("Please enter your Tabs API key to access the application.")
+    
+    # API key input
+    api_key = st.text_input(
+        "API Key",
+        type="password",
+        key="api_key_input",
+        help="Enter your Tabs API key",
+        placeholder="Enter your API key here"
+    )
+    
+    # Submit button
+    if st.button("Submit", type="primary", key="submit_api_key"):
+        if api_key and api_key.strip():
+            with st.spinner("Validating API key..."):
+                if check_api_key(api_key):
+                    st.session_state['tabs_api_key'] = api_key.strip()
+                    st.session_state['authenticated'] = True
+                    st.success("✓ API key validated successfully!")
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid API key. Please check your API key and try again.")
+        else:
+            st.warning("Please enter an API key.")
+    
+    st.markdown("---")
+    st.caption("Contact your Tabs account manager via Slack if you need assistance.")
 
 # Main app
 def main():
@@ -332,4 +394,8 @@ def main():
                 )
  
 if __name__ == "__main__":
-    main()
+    # Check if user is authenticated
+    if not st.session_state.get('authenticated', False):
+        show_authentication()
+    else:
+        main()
