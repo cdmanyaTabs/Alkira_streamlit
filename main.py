@@ -17,7 +17,9 @@ from usage_transformation import (
     prepaid,
     create_contracts,
     create_invoices,
-    create_tabs_ready_usage
+    create_tabs_ready_usage,
+    generate_prepaid_report_data,
+    generate_commit_consumption_data
 )
 
 # Page configuration
@@ -392,7 +394,65 @@ def main():
                     file_name="tabs_ready_usage.csv",
                     mime="text/csv"
                 )
- 
+                
+                # Google Sheets Update Buttons
+                st.markdown("### Update Google Sheets")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("Update Prepaid Sheet", type="secondary"):
+                        try:
+                            from google_sheets import update_prepaid_sheet
+                            
+                            # Get tabs_bt_contract from results
+                            tabs_bt_contract = results.get('tabs_bt_contract')
+                            
+                            # Generate prepaid data
+                            prepaid_data = generate_prepaid_report_data(usage_df, tabs_bt_contract)
+                            
+                            if prepaid_data:
+                                with st.spinner("Updating Prepaid Sheet..."):
+                                    result = update_prepaid_sheet(prepaid_data)
+                                
+                                if result.get('success'):
+                                    st.success(result.get('message'))
+                                else:
+                                    st.error(result.get('message'))
+                            else:
+                                st.warning("No prepaid data found to update")
+                        except ImportError:
+                            st.error("Google Sheets integration not configured. Please set up service account credentials.")
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+                
+                with col2:
+                    if st.button("Update Commit Consumption Sheet", type="secondary"):
+                        try:
+                            from google_sheets import update_commit_consumption_sheet
+                            
+                            # Get tabs_bt_contract and billing_run_date from results
+                            tabs_bt_contract = results.get('tabs_bt_contract')
+                            billing_run_date = results.get('billing_run_date', datetime.now().strftime('%Y-%m-%d'))
+                            
+                            # Generate consumption data
+                            consumption_data = generate_commit_consumption_data(usage_df, tabs_bt_contract)
+                            
+                            if consumption_data:
+                                with st.spinner("Updating Commit Consumption Sheet..."):
+                                    result = update_commit_consumption_sheet(consumption_data, billing_run_date)
+                                
+                                if result.get('success'):
+                                    st.success(result.get('message'))
+                                else:
+                                    st.error(result.get('message'))
+                            else:
+                                st.warning("No consumption data found to update")
+                        except ImportError:
+                            st.error("Google Sheets integration not configured. Please set up service account credentials.")
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+
 if __name__ == "__main__":
     # Check if user is authenticated
     if not st.session_state.get('authenticated', False):

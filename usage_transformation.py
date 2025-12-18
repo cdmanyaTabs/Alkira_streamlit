@@ -5,6 +5,7 @@ import re
 import json
 import pandas as pd
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 from api import get_all_customers, get_event_ids, get_integration_items, create_contract, push_bt
 
 def price_book_transformation(zip_file, billing_run_date=None):
@@ -12,8 +13,9 @@ def price_book_transformation(zip_file, billing_run_date=None):
     Extract ZIP file and parse tenant IDs from filenames.
     Supports ZIP files containing either CSV files or XLSX/XLS files (or both).
     
-    Filename format: price_by_sku_40_Koch_SFDC#00000190.xlsx (or .csv)
-    where 40 is the tenant_id (number after 'price_by_sku_')
+    Filename formats supported:
+    - New format: 40_Koch_SFDC#00000190.xlsx (or .csv) - tenant_id is the number at the start (before first underscore)
+    - Old format: price_by_sku_40_Koch_SFDC#00000190.xlsx (or .csv) - tenant_id is the number after 'price_by_sku_'
     
     Args:
         zip_file: UploadedFile object from Streamlit file_uploader (ZIP file containing CSV or XLSX/XLS files)
@@ -47,17 +49,29 @@ def price_book_transformation(zip_file, billing_run_date=None):
         # Get list of all files in the zip
         file_list = zip_file_obj.namelist()
         
-        # Filter for both CSV and Excel files
-        data_files = [f for f in file_list if f.endswith(('.csv', '.xlsx', '.xls'))]
+        # Filter for both CSV and Excel files, excluding macOS metadata files
+        data_files = [
+            f for f in file_list 
+            if f.endswith(('.csv', '.xlsx', '.xls'))
+            and not f.startswith('__MACOSX/')  # macOS metadata folder
+            and not f.split('/')[-1].startswith('._')  # macOS resource fork files
+        ]
         
-        # Parse each filename to extract tenant_id
+        # Parse each filename to extract tenant_id and contract_name
         for filename in data_files:
-            # Pattern: price_by_sku_40_Koch_SFDC#00000190.xlsx or .csv
-            # Extract the number after 'price_by_sku_'
-            match = re.search(r'price_by_sku_(\d+)_', filename)
+            # Extract just the basename (filename without path) for pattern matching
+            basename = filename.split('/')[-1] if '/' in filename else filename
             
-            if match:
-                tenant_id = match.group(1)
+            # Extract tenant_id: Try new format first (digits at start), fallback to old format (after 'price_by_sku_')
+            # Format: 356_Borgwarner_SFDC#00000323.xlsx or 227-SitaQantas_SFDC#00000312.xlsx
+            tenant_match = re.search(r'^(\d+)[_-]', basename) or re.search(r'price_by_sku_(\d+)_', basename)
+            
+            # Extract contract_name: Pattern like SFDC#00000323 (before file extension)
+            contract_match = re.search(r'(SFDC#\d+)\.\w+$', basename, re.IGNORECASE)
+            
+            if tenant_match:
+                tenant_id = tenant_match.group(1)
+                contract_name = contract_match.group(1) if contract_match else ''
                 
                 # Read the file from zip
                 try:
@@ -83,9 +97,23 @@ def price_book_transformation(zip_file, billing_run_date=None):
                     matched_columns = []
                     missing_columns = []
                     
+                    # Special handling for Net Terms - accept variations: "Net Terms", "Terms", or "Term"
+                    net_terms_variations = ['net terms', 'terms', 'term']
+                    net_terms_found = None
+                    for variation in net_terms_variations:
+                        if variation in df_columns_lower:
+                            net_terms_found = df_columns_lower[variation]
+                            break
+                    
                     for req_col in required_columns:
                         req_col_lower = req_col.lower()
-                        if req_col_lower in df_columns_lower:
+                        if req_col_lower == 'net terms':
+                            # Handle Net Terms variations
+                            if net_terms_found:
+                                matched_columns.append(net_terms_found)
+                            else:
+                                missing_columns.append(req_col)
+                        elif req_col_lower in df_columns_lower:
                             matched_columns.append(df_columns_lower[req_col_lower])
                         else:
                             missing_columns.append(req_col)
@@ -99,6 +127,10 @@ def price_book_transformation(zip_file, billing_run_date=None):
                     
                     # Select only the matched columns
                     df = df_full[matched_columns].copy()
+                    
+                    # Normalize Net Terms column name if it was found with a variation
+                    if net_terms_found and net_terms_found != 'Net Terms':
+                        df = df.rename(columns={net_terms_found: 'Net Terms'})
                     
                     # Check for Excel formula errors in NET RATE column
                     if 'NET RATE' in df.columns:
@@ -117,6 +149,9 @@ def price_book_transformation(zip_file, billing_run_date=None):
                     # Add tenant_id column with the tenant_id value for every row
                     df['tenant_id'] = tenant_id
                     
+                    # Add contract_name column with the contract name from filename
+                    df['contract_name'] = contract_name
+                    
                     # Add Tabs Customer ID column (to be populated later via API)
                     df['Tabs Customer ID'] = None
                     
@@ -130,7 +165,8 @@ def price_book_transformation(zip_file, billing_run_date=None):
                     customer_files[tenant_id] = {
                         'filename': filename,
                         'data': df,
-                        'tenant_id': tenant_id
+                        'tenant_id': tenant_id,
+                        'contract_name': contract_name
                     }
                     
                     # Add to list for combining
@@ -161,13 +197,24 @@ def price_book_transformation(zip_file, billing_run_date=None):
                     tabs_customer_id = customer.get('id')
                     custom_fields = customer.get('customFields', [])
                     
-                    # Find the Tenant ID custom field
+                    # Find the Tenant ID custom field, fallback to Account # if not found
+                    tenant_id_value = None
                     for field in custom_fields:
-                        if field.get('customFieldName') == 'Tenant ID':
+                        field_name = field.get('customFieldName')
+                        if field_name == 'Tenant ID':
                             tenant_id_value = field.get('customFieldValue')
                             if tenant_id_value:
                                 tenant_to_customer_id[tenant_id_value] = tabs_customer_id
                                 break
+                    
+                    # If Tenant ID not found, try Account #
+                    if not tenant_id_value:
+                        for field in custom_fields:
+                            if field.get('customFieldName') == 'Account #':
+                                tenant_id_value = field.get('customFieldValue')
+                                if tenant_id_value:
+                                    tenant_to_customer_id[tenant_id_value] = tabs_customer_id
+                                    break
                 
                 # Collect all unique tenant_ids from the files
                 file_tenant_ids = set()
@@ -190,19 +237,21 @@ def price_book_transformation(zip_file, billing_run_date=None):
                 try:
                     events_df = get_event_ids()
                     
-                    # Create mapping dictionary: event_name -> event_id
+                    # Create mapping dictionary: event_name -> event_id (case-insensitive)
                     event_name_to_id = {}
                     if not events_df.empty and 'name' in events_df.columns and 'id' in events_df.columns:
                         for _, row in events_df.iterrows():
                             event_name = row.get('name')
                             event_id = row.get('id')
                             if event_name and event_id:
-                                event_name_to_id[event_name] = event_id
+                                # Use lowercase as key for case-insensitive matching
+                                event_name_to_id[event_name.lower()] = event_id
                     
                     # Update event_to_track in all DataFrames
                     for df in all_dataframes:
                         if 'SKU Name' in df.columns:
-                            df['event_to_track'] = df['SKU Name'].map(event_name_to_id)
+                            # Convert SKU Name to lowercase for case-insensitive matching
+                            df['event_to_track'] = df['SKU Name'].str.lower().map(event_name_to_id)
                             
                             # Check for unmatched SKU Names
                             unmatched_skus = df[df['event_to_track'].isna() & df['SKU Name'].notna()]['SKU Name'].unique()
@@ -278,7 +327,7 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None):
         pd.DataFrame: Filtered DataFrame with: Tabs Customer ID, event_to_track, 
                      integration_item_id, SKU Name, NET RATE, and additional hardcoded columns
     """
-    filtered_columns = ['Tabs Customer ID', 'event_to_track', 'integration_item_id', 'SKU Name', 'NET RATE', 'tenant_id', 'Net Terms']
+    filtered_columns = ['Tabs Customer ID', 'event_to_track', 'integration_item_id', 'SKU Name', 'NET RATE', 'tenant_id', 'contract_name', 'Net Terms']
     available_columns = [col for col in filtered_columns if col in combined_df.columns]
     filtered_df = combined_df[available_columns].copy()
     
@@ -377,8 +426,8 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None):
 def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
     """
     Compare the filtered_df with the Raw Monthly Usage file.
-    Filter filtered_df to only include rows where tenant_id and name match
-    the Tenant ID and SKU Name from the raw monthly usage file.
+    Filter filtered_df to only include rows where tenant_id, name, and contract_name match
+    the Tenant ID, SKU Name, and Contract from the raw monthly usage file.
     
     Args:
         filtered_df: Filtered DataFrame from tabs_billing_terms_format
@@ -402,38 +451,42 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
             print(f"Unsupported file type: {file_extension}")
             return filtered_df
         
-        # Check if required columns exist in raw usage file
-        required_columns = ['Tenant ID', 'SKU Name']
+        # Check if required columns exist in raw usage file (including Contract)
+        required_columns = ['Tenant ID', 'SKU Name', 'Contract']
         missing_columns = [col for col in required_columns if col not in raw_usage_df.columns]
         
         if missing_columns:
             print(f"Error: Missing required columns in raw monthly usage file: {', '.join(missing_columns)}")
-            return filtered_df
+            raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
         
-        # Get unique combinations of Tenant ID and SKU Name from raw usage file
+        # Get unique combinations of Tenant ID, SKU Name, and Contract from raw usage file
         # Convert to string and handle any NaN values
         raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(str)
         raw_usage_df['SKU Name'] = raw_usage_df['SKU Name'].astype(str)
+        raw_usage_df['Contract'] = raw_usage_df['Contract'].astype(str)
         
-        # Create a set of tuples for matching (Tenant ID, SKU Name)
-        matching_pairs = set(zip(raw_usage_df['Tenant ID'], raw_usage_df['SKU Name']))
+        # Create a set of tuples for matching (Tenant ID, SKU Name, Contract)
+        matching_tuples = set(zip(raw_usage_df['Tenant ID'], raw_usage_df['SKU Name'], raw_usage_df['Contract']))
         
         # Make a copy of filtered_df to avoid modifying the original
         filtered_df_copy = filtered_df.copy()
         
-        # Convert tenant_id and name to string for comparison
+        # Convert tenant_id, name, and contract_name to string for comparison
         filtered_df_copy['tenant_id'] = filtered_df_copy['tenant_id'].astype(str)
         filtered_df_copy['name'] = filtered_df_copy['name'].astype(str)
+        filtered_df_copy['contract_name'] = filtered_df_copy['contract_name'].astype(str) if 'contract_name' in filtered_df_copy.columns else ''
         
-        # Filter filtered_df to only include rows where (tenant_id, name) matches
+        # Filter filtered_df to only include rows where (tenant_id, name, contract_name) matches
         # any combination in the raw usage file
         mask = filtered_df_copy.apply(
-            lambda row: (str(row['tenant_id']), str(row['name'])) in matching_pairs,
+            lambda row: (str(row['tenant_id']), str(row['name']), str(row.get('contract_name', ''))) in matching_tuples,
             axis=1
         )
         
         # Create Tabs_bt_final_df with only matching rows
         Tabs_bt_clean_df = filtered_df_copy[mask].copy()
+        
+        print(f"Matched {len(Tabs_bt_clean_df)} rows using (Tenant ID, SKU Name, Contract) matching")
         
         return Tabs_bt_clean_df
         
@@ -552,10 +605,10 @@ def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_da
                 'is_volume': 'FALSE',
                 'billing_type': 'UNIT_PRICE',
                 'invoiceDateStrategy': 'ARREARS',
-                'event_to_track': 'f62255fd-9a75-4e23-b8bd-d39500334d22',
+                'event_to_track': 'a12f94a4-6634-4e98-9587-7700b42808ed',
                 'name': 'Enterprise Support',
                 'note': '',
-                'integration_item_id': 'c9893624-ea6d-495f-8a8e-38fa4ef75050',
+                'integration_item_id': '',
                 'revenue_start_date': billing_run_date,
                 'revenue_end_date': revenue_end_date,
                 'invoice_type': 'INVOICE',
@@ -623,14 +676,14 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None):
             print(f"Unsupported file type: {file_extension}")
             return tabs_bt_enterprise
         
-        # Check if prepaid file has at least 1 column (Column A for Tenant ID)
-        if len(prepaid_df.columns) < 1:
-            print(f"Error: Prepaid file must have at least 1 column (Column A for Tenant ID)")
+        # Check if prepaid file has at least 2 columns (Column A for Date Modified, Column B for Tenant ID)
+        if len(prepaid_df.columns) < 2:
+            print(f"Error: Prepaid file must have at least 2 columns (Column A: Date Modified, Column B: Tenant ID)")
             print(f"File has {len(prepaid_df.columns)} column(s)")
             return tabs_bt_enterprise
         
-        # Use column A (index 0) for Tenant ID
-        tenant_id_col = prepaid_df.columns[0]
+        # Use column B (index 1) for Tenant ID (Column A is Date Modified)
+        tenant_id_col = prepaid_df.columns[1]
         # Convert to numeric first (handles floats), then to int, then to string to remove .0
         prepaid_df['Tenant ID'] = pd.to_numeric(prepaid_df[tenant_id_col], errors='coerce').fillna(0).astype(int).astype(str)
         
@@ -713,10 +766,10 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None):
                 'is_volume': 'FALSE',
                 'billing_type': 'UNIT_PRICE',
                 'invoiceDateStrategy': 'ARREARS',
-                'event_to_track': '16cb100d-4e22-41c8-bc06-603729e819ea',
+                'event_to_track': '48ef8004-9735-4830-99fc-801161eb8d7f',
                 'name': 'Prepaid',  
                 'note': '',
-                'integration_item_id': '24ab1afb-a18f-4fe5-8ba4-a6c274d89139',
+                'integration_item_id': '',
                 'revenue_start_date': billing_run_date,
                 'revenue_end_date': revenue_end_date,
                 'invoice_type': 'INVOICE',
@@ -872,6 +925,17 @@ def create_invoices(tabs_bt_contract):
         # Make a copy to avoid modifying the original
         result_df = tabs_bt_contract.copy()
         
+        # Debug: Log what's being sent to push_bt
+        print(f"\n=== DEBUG: create_invoices ===")
+        print(f"Rows in tabs_bt_contract being sent to push_bt: {len(result_df)}")
+        if 'customer_id' in result_df.columns:
+            unique_customers = result_df['customer_id'].nunique()
+            print(f"Unique customer_ids: {unique_customers}")
+        if 'name' in result_df.columns:
+            unique_names = result_df['name'].nunique()
+            print(f"Unique SKU names: {unique_names}")
+        print("=" * 40 + "\n")
+        
         # Remove tenant_id column if it exists
         if 'tenant_id' in result_df.columns:
             result_df = result_df.drop(columns=['tenant_id'])
@@ -963,29 +1027,39 @@ def create_invoices(tabs_bt_contract):
 
 def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise_support_file=None, billing_run_date=None):
     """
-    Generate CSV-ready DataFrame from raw monthly usage file.
-    Maps Tenant ID to Tabs customer_id and creates output with customer_id, SKU Name, datetime, and Meter.
-    Filters output to only include customer_ids that exist in tabs_bt_contract.
-    Adds Enterprise Support rows and calculates their values using Enterprise Support %.
+    Generate CSV-ready DataFrame from tabs_bt_contract.
+    Creates one usage row for each billing term in tabs_bt_contract.
+    Looks up Meter values from raw monthly usage file based on (customer_id, SKU Name) combinations.
+    Adds Enterprise Support and Prepaid rows with calculated values.
     
     Args:
         raw_monthly_usage_file: UploadedFile object from Streamlit file_uploader (CSV, XLSX, or XLS)
-        tabs_bt_contract: DataFrame with contract information containing customer_id column
+        tabs_bt_contract: DataFrame with contract information containing customer_id and name columns
         enterprise_support_file: Optional UploadedFile object from Streamlit file_uploader (CSV, XLSX, or XLS) with Enterprise Support % data
         billing_run_date: Optional billing run date in YYYY-MM-DD format (defaults to date two weeks ago if not provided)
         
     Returns:
-        pd.DataFrame: DataFrame with columns: customer_id, event_type_name, datetime, value, differentiator
+        pd.DataFrame: DataFrame with columns: customer_id, event_type_name, datetime, value, differentiator, invoice
     """
     if raw_monthly_usage_file is None:
         return pd.DataFrame()
     
     if tabs_bt_contract is None or tabs_bt_contract.empty:
-        print("Warning: tabs_bt_contract is empty or None, cannot filter by customer_id")
+        print("Warning: tabs_bt_contract is empty or None, cannot create usage rows")
         return pd.DataFrame()
     
+    # Debug: Log initial tabs_bt_contract info
+    print(f"\n=== DEBUG: create_tabs_ready_usage ===")
+    print(f"Initial tabs_bt_contract rows: {len(tabs_bt_contract)}")
+    if 'customer_id' in tabs_bt_contract.columns:
+        unique_customer_ids_bt = tabs_bt_contract['customer_id'].nunique()
+        print(f"Unique customer_ids in tabs_bt_contract: {unique_customer_ids_bt}")
+        if 'name' in tabs_bt_contract.columns:
+            unique_names_bt = tabs_bt_contract['name'].nunique()
+            print(f"Unique SKU names in tabs_bt_contract: {unique_names_bt}")
+    
     try:
-        # Read the raw monthly usage file based on file extension
+        # Read the raw monthly usage file to create lookup dictionary
         file_extension = raw_monthly_usage_file.name.split('.')[-1].lower()
         
         if file_extension == 'csv':
@@ -996,16 +1070,18 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             print(f"Unsupported file type: {file_extension}")
             return pd.DataFrame()
         
-        # Check if required columns exist in raw usage file
-        required_columns = ['Tenant ID', 'SKU Name', 'Meter']
+        # Check if required columns exist in raw usage file (including Contract and Tenant Name)
+        required_columns = ['Tenant ID', 'Tenant Name', 'SKU Name', 'Meter', 'Contract']
         missing_columns = [col for col in required_columns if col not in raw_usage_df.columns]
         
         if missing_columns:
             print(f"Error: Missing required columns in raw monthly usage file: {', '.join(missing_columns)}")
-            return pd.DataFrame()
+            raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
         
-        # Convert Tenant ID to string for matching
+        # Convert columns to string for matching
         raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(str)
+        raw_usage_df['Tenant Name'] = raw_usage_df['Tenant Name'].astype(str)
+        raw_usage_df['Contract'] = raw_usage_df['Contract'].astype(str)
         
         # Get all customers from API to map tenant_id to Tabs Customer ID
         try:
@@ -1017,15 +1093,26 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 tabs_customer_id = customer.get('id')
                 custom_fields = customer.get('customFields', [])
                 
-                # Find the Tenant ID custom field
+                # Find the Tenant ID custom field, fallback to Account # if not found
+                tenant_id_value = None
                 for field in custom_fields:
-                    if field.get('customFieldName') == 'Tenant ID':
+                    field_name = field.get('customFieldName')
+                    if field_name == 'Tenant ID':
                         tenant_id_value = field.get('customFieldValue')
                         if tenant_id_value:
                             tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
                             break
+                
+                # If Tenant ID not found, try Account #
+                if not tenant_id_value:
+                    for field in custom_fields:
+                        if field.get('customFieldName') == 'Account #':
+                            tenant_id_value = field.get('customFieldValue')
+                            if tenant_id_value:
+                                tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
+                                break
             
-            # Map Tenant ID to customer_id
+            # Map Tenant ID to customer_id in raw usage
             raw_usage_df['customer_id'] = raw_usage_df['Tenant ID'].map(tenant_to_customer_id)
             
             # Check for unmatched tenant IDs
@@ -1035,11 +1122,49 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 print(f"Warning: No matching Tabs Customer ID found for tenant ID(s): {', '.join(sorted(unmatched_tenant_ids, key=str))}")
             
             # Filter out rows where customer_id mapping failed
-            output_df = raw_usage_df[raw_usage_df['customer_id'].notna()].copy()
+            raw_usage_df = raw_usage_df[raw_usage_df['customer_id'].notna()].copy()
             
-            if output_df.empty:
-                print("Warning: No rows with valid customer_id mappings found")
-                return pd.DataFrame()
+            # Create a lookup dictionary: (customer_id, SKU Name, Contract, Tenant Name) -> Meter value (sum if multiple rows)
+            # This groups by Tenant Name so different Tenant Names keep separate rows
+            usage_lookup = {}
+            for _, row in raw_usage_df.iterrows():
+                customer_id = str(row['customer_id'])
+                sku_name = str(row['SKU Name'])
+                contract = str(row['Contract'])
+                tenant_name = str(row['Tenant Name'])
+                meter_value = row['Meter']
+                
+                key = (customer_id, sku_name, contract, tenant_name)
+                if key not in usage_lookup:
+                    usage_lookup[key] = 0
+                
+                # Sum if multiple rows exist for same combination (same Tenant ID + Tenant Name + SKU)
+                try:
+                    meter_float = float(str(meter_value).replace(',', '').strip()) if pd.notna(meter_value) else 0
+                    usage_lookup[key] += meter_float
+                except (ValueError, TypeError):
+                    pass
+            
+            print(f"Created usage lookup with {len(usage_lookup)} (customer_id, SKU, Contract, Tenant Name) combinations")
+            
+            # Create invoice number mapping: For each Tenant ID, assign sequential numbers to unique Tenant Names
+            # invoice_mapping: (Tenant ID, Tenant Name) -> invoice number
+            tenant_id_to_tenant_names = {}
+            for _, row in raw_usage_df.iterrows():
+                tenant_id = str(row['Tenant ID'])
+                tenant_name = str(row['Tenant Name'])
+                if tenant_id not in tenant_id_to_tenant_names:
+                    tenant_id_to_tenant_names[tenant_id] = []
+                if tenant_name not in tenant_id_to_tenant_names[tenant_id]:
+                    tenant_id_to_tenant_names[tenant_id].append(tenant_name)
+            
+            # Create the invoice mapping
+            invoice_mapping = {}
+            for tenant_id, tenant_names in tenant_id_to_tenant_names.items():
+                for idx, tenant_name in enumerate(tenant_names, start=1):
+                    invoice_mapping[(tenant_id, tenant_name)] = idx
+            
+            print(f"Created invoice mapping for {len(invoice_mapping)} (Tenant ID, Tenant Name) combinations")
             
         except Exception as e:
             print(f"Error fetching customers from API: {str(e)}")
@@ -1047,307 +1172,355 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         
         # Use billing_run_date if provided, otherwise use date two weeks ago
         if billing_run_date:
-            # Validate date format
             try:
                 datetime.strptime(billing_run_date, '%Y-%m-%d')
-                output_df['datetime'] = billing_run_date
+                billing_date = billing_run_date
             except ValueError:
                 print(f"Warning: Invalid billing_run_date format. Expected YYYY-MM-DD, got: {billing_run_date}")
-                output_df['datetime'] = (datetime.now() - timedelta(weeks=2)).strftime('%Y-%m-%d')
+                billing_date = (datetime.now() - timedelta(weeks=2)).strftime('%Y-%m-%d')
         else:
-            output_df['datetime'] = (datetime.now() - timedelta(weeks=2)).strftime('%Y-%m-%d')
+            billing_date = (datetime.now() - timedelta(weeks=2)).strftime('%Y-%m-%d')
         
-        # Select only the required columns: customer_id, SKU Name, datetime, Meter
-        # (will be renamed to event_type_name and value)
-        output_df = output_df[['customer_id', 'SKU Name', 'datetime', 'Meter']].copy()
+        # Create reverse mapping: customer_id -> tenant_id
+        customer_id_to_tenant_id = {v: k for k, v in tenant_to_customer_id.items()}
         
-        # Rename columns: SKU Name -> event_type_name, Meter -> value
-        output_df = output_df.rename(columns={
-            'SKU Name': 'event_type_name',
-            'Meter': 'value'
-        })
+        # Get set of valid (customer_id, sku_name, contract_name) from tabs_bt_contract for filtering
+        valid_billing_terms = set()
+        enterprise_support_rows = []
+        prepaid_rows = []
         
-        # Add differentiator column with blank values
-        output_df['differentiator'] = ''
-        
-        # Reset index
-        output_df = output_df.reset_index(drop=True)
-        
-        # Filter output_df to only include customer_ids that exist in tabs_bt_contract
-        if 'customer_id' in tabs_bt_contract.columns:
-            # Get unique customer_ids from tabs_bt_contract
-            valid_customer_ids = tabs_bt_contract['customer_id'].unique()
+        for _, bt_row in tabs_bt_contract.iterrows():
+            customer_id = str(bt_row.get('customer_id', ''))
+            sku_name = str(bt_row.get('name', ''))
+            contract_name = str(bt_row.get('contract_name', '')) if 'contract_name' in bt_row.index else ''
             
-            # Convert both to string for reliable matching
-            valid_customer_ids = set(str(cid) for cid in valid_customer_ids if pd.notna(cid))
-            output_df['customer_id'] = output_df['customer_id'].astype(str)
+            if not customer_id or not sku_name or customer_id == 'nan' or sku_name == 'nan':
+                continue
             
-            # Store original count before filtering
-            original_count = len(output_df)
+            # Check if this is Enterprise Support or Prepaid row
+            is_enterprise_support = 'Enterprise Support' in sku_name or sku_name == 'Enterprise Support'
+            is_prepaid = 'Prepaid' in sku_name or sku_name == 'Prepaid'
             
-            # Filter output_df to only include rows where customer_id is in tabs_bt_contract
-            output_df = output_df[output_df['customer_id'].isin(valid_customer_ids)].copy()
-            
-            # Reset index after filtering
-            output_df = output_df.reset_index(drop=True)
-            
-            # Warn if any rows were filtered out
-            filtered_count = original_count - len(output_df)
-            if filtered_count > 0:
-                print(f"Warning: Filtered out {filtered_count} row(s) with customer_ids not found in tabs_bt_contract")
-        else:
-            print("Warning: 'customer_id' column not found in tabs_bt_contract, skipping filter")
+            if is_enterprise_support:
+                # Store for later processing (needs calculation based on other rows)
+                enterprise_support_rows.append({
+                    'customer_id': customer_id,
+                    'name': sku_name,
+                    'contract_name': contract_name,
+                    'bt_row': bt_row
+                })
+            elif is_prepaid:
+                # Store for later processing (needs calculation based on other rows)
+                prepaid_rows.append({
+                    'customer_id': customer_id,
+                    'name': sku_name,
+                    'contract_name': contract_name,
+                    'bt_row': bt_row
+                })
+            else:
+                # Add to valid billing terms set
+                valid_billing_terms.add((customer_id, sku_name, contract_name))
         
-        # Read Enterprise Support % from enterprise_support_file if provided
-        customer_to_enterprise_pct = {}
-        if enterprise_support_file is not None:
-            try:
-                # Read the enterprise support file based on file extension
-                file_extension = enterprise_support_file.name.split('.')[-1].lower()
+        # Create output_df by iterating through usage_lookup
+        # This creates one row per unique (customer_id, SKU, Contract, Tenant Name) combination
+        output_rows = []
+        for lookup_key, meter_value in usage_lookup.items():
+            customer_id, sku_name, contract, tenant_name = lookup_key
+            
+            # Only include rows that match a billing term in tabs_bt_contract
+            if (customer_id, sku_name, contract) not in valid_billing_terms:
+                continue
+            
+            # Get tenant_id from customer_id for invoice lookup
+            tenant_id = customer_id_to_tenant_id.get(customer_id, '')
+            
+            # Get invoice number from mapping
+            invoice_num = invoice_mapping.get((tenant_id, tenant_name), 1)
+            
+            output_rows.append({
+                'customer_id': customer_id,
+                'event_type_name': sku_name,
+                'datetime': billing_date,
+                'value': meter_value,
+                'differentiator': '',
+                'invoice': invoice_num
+            })
+        
+        # Create initial output_df from regular billing terms
+        output_df = pd.DataFrame(output_rows)
+        print(f"Created {len(output_df)} usage rows from regular billing terms")
+        
+        # Create mapping from (customer_id, contract) -> invoice number for Enterprise Support/Prepaid rows
+        # This allows us to assign the correct invoice number based on contract
+        contract_to_invoice = {}
+        for row_data in output_rows:
+            customer_id = row_data.get('customer_id', '')
+            invoice_num = row_data.get('invoice', '')
+            # We need to get the contract from the usage_lookup key
+            # The contract is stored in the lookup key, let's rebuild this mapping
+        
+        # Rebuild contract mapping from usage_lookup keys
+        for lookup_key, _ in usage_lookup.items():
+            customer_id, sku_name, contract, tenant_name = lookup_key
+            if (customer_id, sku_name, contract) in valid_billing_terms:
+                tenant_id = customer_id_to_tenant_id.get(customer_id, '')
+                invoice_num = invoice_mapping.get((tenant_id, tenant_name), 1)
+                # Store (customer_id, contract) -> invoice_num
+                # If multiple tenant names exist for same contract, just use the first one found
+                if (customer_id, contract) not in contract_to_invoice:
+                    contract_to_invoice[(customer_id, contract)] = invoice_num
+        
+        print(f"Created contract_to_invoice mapping with {len(contract_to_invoice)} entries")
+        
+        # Process Enterprise Support rows (if any)
+        if enterprise_support_rows:
+            # Read Enterprise Support % from enterprise_support_file if provided
+            customer_to_enterprise_pct = {}
+            if enterprise_support_file is not None:
+                try:
+                    # Read the enterprise support file based on file extension
+                    file_extension = enterprise_support_file.name.split('.')[-1].lower()
                 
-                if file_extension == 'csv':
-                    enterprise_df = pd.read_csv(enterprise_support_file)
-                elif file_extension in ['xlsx', 'xls']:
-                    enterprise_df = pd.read_excel(enterprise_support_file)
-                else:
-                    print(f"Unsupported file type for enterprise support file: {file_extension}")
-                    enterprise_df = pd.DataFrame()
-                
-                if not enterprise_df.empty:
-                    # Check if required columns exist
-                    # Column E (index 4) is assumed to contain Enterprise Support %
-                    if 'Tenant ID' not in enterprise_df.columns:
-                        print(f"Warning: Missing required column 'Tenant ID' in enterprise support file")
-                        print(f"Available columns: {', '.join(enterprise_df.columns.tolist())}")
-                    elif len(enterprise_df.columns) < 5:
-                        print(f"Warning: Enterprise support file must have at least 5 columns (Column E for Enterprise Support %)")
-                        print(f"File has {len(enterprise_df.columns)} column(s)")
+                    if file_extension == 'csv':
+                        enterprise_df = pd.read_csv(enterprise_support_file)
+                    elif file_extension in ['xlsx', 'xls']:
+                        enterprise_df = pd.read_excel(enterprise_support_file)
                     else:
-                        # Use column E (index 4) for Enterprise Support %
-                        enterprise_support_col = enterprise_df.columns[4]
-                        enterprise_df['Enterprise Support %'] = enterprise_df[enterprise_support_col]
-                        
-                        # Convert Tenant ID to string
-                        enterprise_df['Tenant ID'] = enterprise_df['Tenant ID'].astype(str)
-                        
-                        # Get all customers from API to map Tenant ID to customer_id
-                        try:
-                            customers_data = get_all_customers()
-                            
-                            # Create mapping: tenant_id -> tabs_customer_id
-                            tenant_to_customer_id = {}
-                            for customer in customers_data:
-                                tabs_customer_id = customer.get('id')
-                                custom_fields = customer.get('customFields', [])
-                                
-                                # Find the Tenant ID custom field
-                                for field in custom_fields:
-                                    if field.get('customFieldName') == 'Tenant ID':
-                                        tenant_id_value = field.get('customFieldValue')
-                                        if tenant_id_value:
-                                            tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
-                                            break
-                            
-                            # Create mapping: customer_id -> Enterprise Support %
-                            for _, row in enterprise_df.iterrows():
-                                tenant_id = str(row['Tenant ID'])
-                                enterprise_pct = row['Enterprise Support %']
-                                
-                                # Convert percentage to decimal if needed (handle both "50" and "50%" formats)
-                                if pd.notna(enterprise_pct):
-                                    try:
-                                        # Try to convert to float
-                                        pct_value = float(str(enterprise_pct).replace('%', '').strip())
-                                        # If value is > 1, assume it's a percentage and divide by 100
-                                        if pct_value > 1:
-                                            pct_value = pct_value / 100
-                                        # Map Tenant ID to customer_id
-                                        if tenant_id in tenant_to_customer_id:
-                                            customer_id = tenant_to_customer_id[tenant_id]
-                                            customer_to_enterprise_pct[str(customer_id)] = pct_value
-                                    except (ValueError, TypeError):
-                                        print(f"Warning: Could not parse Enterprise Support % for Tenant ID {tenant_id}: {enterprise_pct}")
-                        
-                        except Exception as e:
-                            print(f"Error fetching customers for Enterprise Support mapping: {str(e)}")
-                        
-            except Exception as e:
-                print(f"Error reading enterprise support file: {str(e)}")
-        
-        # Add rows for Enterprise Support customer_ids
-        if 'name' in tabs_bt_contract.columns:
-            # Find rows where name contains "Enterprise Support"
-            enterprise_rows = tabs_bt_contract[tabs_bt_contract['name'].str.contains('Enterprise Support', case=False, na=False)]
-            
-            if not enterprise_rows.empty:
-                # Get unique customer_ids from Enterprise Support rows
-                enterprise_customer_ids = enterprise_rows['customer_id'].unique()
-                enterprise_customer_ids = [str(cid) for cid in enterprise_customer_ids if pd.notna(cid)]
-                
-                if enterprise_customer_ids:
-                    # Get datetime from output_df (use first row's value if available)
-                    if not output_df.empty and 'datetime' in output_df.columns:
-                        billing_date = output_df['datetime'].iloc[0]
-                    elif billing_run_date:
-                        billing_date = billing_run_date
-                    else:
-                        billing_date = (datetime.now() - timedelta(weeks=2)).strftime('%Y-%m-%d')
+                        print(f"Unsupported file type for enterprise support file: {file_extension}")
+                        enterprise_df = pd.DataFrame()
                     
-                    # Create new rows for each Enterprise Support customer_id
-                    enterprise_new_rows = []
-                    for customer_id in enterprise_customer_ids:
-                        # Check if this customer_id + event_type_name combination already exists
-                        existing = output_df[(output_df['customer_id'] == customer_id) & 
-                                           (output_df['event_type_name'] == 'Enterprise Support')]
-                        
-                        # Only add if it doesn't already exist
-                        if existing.empty:
-                            # Calculate value using formula: sum(value * amount_1) * Enterprise Support %
-                            calculated_value = 0
+                    if not enterprise_df.empty:
+                        # Check if required columns exist
+                        # Column E (index 4) is assumed to contain Enterprise Support %
+                        if 'Tenant ID' not in enterprise_df.columns:
+                            print(f"Warning: Missing required column 'Tenant ID' in enterprise support file")
+                            print(f"Available columns: {', '.join(enterprise_df.columns.tolist())}")
+                        elif len(enterprise_df.columns) < 5:
+                            print(f"Warning: Enterprise support file must have at least 5 columns (Column E for Enterprise Support %)")
+                            print(f"File has {len(enterprise_df.columns)} column(s)")
+                        else:
+                            # Use column E (index 4) for Enterprise Support %
+                            enterprise_support_col = enterprise_df.columns[4]
+                            enterprise_df['Enterprise Support %'] = enterprise_df[enterprise_support_col]
                             
-                            # Get Enterprise Support % for this customer_id
-                            enterprise_pct = customer_to_enterprise_pct.get(customer_id, 0)
+                            # Convert Tenant ID to string
+                            enterprise_df['Tenant ID'] = enterprise_df['Tenant ID'].astype(str)
                             
-                            if enterprise_pct > 0:
-                                # Find all rows in output_df with this customer_id (excluding Enterprise Support rows)
-                                customer_rows = output_df[(output_df['customer_id'] == customer_id) & 
-                                                          (output_df['event_type_name'] != 'Enterprise Support')]
+                            # Get all customers from API to map Tenant ID to customer_id
+                            try:
+                                customers_data = get_all_customers()
                                 
-                                if not customer_rows.empty:
-                                    # Match each row to tabs_bt_contract to get amount_1
-                                    sum_product = 0
-                                    for _, row in customer_rows.iterrows():
-                                        event_type_name = row['event_type_name']
-                                        value = row['value']
-                                        
-                                        # Try to convert value to float
-                                        try:
-                                            value_float = float(str(value).replace(',', '').strip()) if pd.notna(value) and str(value).strip() else 0
-                                        except (ValueError, TypeError):
-                                            value_float = 0
-                                        
-                                        # Find matching row in tabs_bt_contract by customer_id and name/event_type_name
-                                        matching_contract_rows = tabs_bt_contract[
-                                            (tabs_bt_contract['customer_id'].astype(str) == customer_id) &
-                                            (tabs_bt_contract['name'].astype(str) == str(event_type_name))
-                                        ]
-                                        
-                                        if not matching_contract_rows.empty:
-                                            # Get amount_1 from first matching row
-                                            amount_1 = matching_contract_rows.iloc[0].get('amount_1', 0)
-                                            try:
-                                                amount_1_float = float(str(amount_1).replace(',', '').strip()) if pd.notna(amount_1) and str(amount_1).strip() else 0
-                                            except (ValueError, TypeError):
-                                                amount_1_float = 0
-                                            
-                                            # Calculate value * amount_1
-                                            sum_product += value_float * amount_1_float
+                                # Create mapping: tenant_id -> tabs_customer_id
+                                tenant_to_customer_id = {}
+                                for customer in customers_data:
+                                    tabs_customer_id = customer.get('id')
+                                    custom_fields = customer.get('customFields', [])
                                     
-                                    # Multiply sum by Enterprise Support % (already in decimal form)
-                                    calculated_value = sum_product * enterprise_pct
+                                    # Find the Tenant ID custom field, fallback to Account # if not found
+                                    tenant_id_value = None
+                                    for field in custom_fields:
+                                        field_name = field.get('customFieldName')
+                                        if field_name == 'Tenant ID':
+                                            tenant_id_value = field.get('customFieldValue')
+                                            if tenant_id_value:
+                                                tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
+                                                break
+                                    
+                                    # If Tenant ID not found, try Account #
+                                    if not tenant_id_value:
+                                        for field in custom_fields:
+                                            if field.get('customFieldName') == 'Account #':
+                                                tenant_id_value = field.get('customFieldValue')
+                                                if tenant_id_value:
+                                                    tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
+                                                    break
+                                
+                                # Create mapping: customer_id -> Enterprise Support %
+                                for _, row in enterprise_df.iterrows():
+                                    tenant_id = str(row['Tenant ID'])
+                                    enterprise_pct = row['Enterprise Support %']
+                                    
+                                    # Convert percentage to decimal if needed (handle both "50" and "50%" formats)
+                                    if pd.notna(enterprise_pct):
+                                        try:
+                                            # Try to convert to float
+                                            pct_value = float(str(enterprise_pct).replace('%', '').strip())
+                                            # If value is > 1, assume it's a percentage and divide by 100
+                                            if pct_value > 1:
+                                                pct_value = pct_value / 100
+                                            # Map Tenant ID to customer_id
+                                            if tenant_id in tenant_to_customer_id:
+                                                customer_id = tenant_to_customer_id[tenant_id]
+                                                customer_to_enterprise_pct[str(customer_id)] = pct_value
+                                        except (ValueError, TypeError):
+                                            print(f"Warning: Could not parse Enterprise Support % for Tenant ID {tenant_id}: {enterprise_pct}")
                             
-                            new_row = {
-                                'customer_id': customer_id,
-                                'event_type_name': 'Enterprise Support',
-                                'datetime': billing_date,
-                                'value': calculated_value,
-                                'differentiator': ''
-                            }
-                            enterprise_new_rows.append(new_row)
+                            except Exception as e:
+                                print(f"Error fetching customers for Enterprise Support mapping: {str(e)}")
+                
+                except Exception as e:
+                    print(f"Error reading enterprise support file: {str(e)}")
+            
+            # Process Enterprise Support rows
+            enterprise_new_rows = []
+            for es_info in enterprise_support_rows:
+                customer_id = es_info['customer_id']
+                sku_name = es_info['name']
+                
+                # Calculate value using formula: sum(value * amount_1) * Enterprise Support %
+                calculated_value = 0
+                
+                # Get Enterprise Support % for this customer_id
+                enterprise_pct = customer_to_enterprise_pct.get(customer_id, 0)
+                
+                if enterprise_pct > 0:
+                    # Find all rows in output_df with this customer_id (excluding Enterprise Support rows)
+                    customer_rows = output_df[(output_df['customer_id'] == customer_id) & 
+                                              (output_df['event_type_name'] != 'Enterprise Support')]
                     
-                    # Append new Enterprise Support rows to output_df
-                    if enterprise_new_rows:
-                        enterprise_df = pd.DataFrame(enterprise_new_rows)
-                        output_df = pd.concat([output_df, enterprise_df], ignore_index=True)
-                        print(f"Added {len(enterprise_new_rows)} Enterprise Support row(s) to output_df")
+                    if not customer_rows.empty:
+                        # Match each row to tabs_bt_contract to get amount_1
+                        # Use Decimal for precise financial calculations
+                        sum_product = Decimal('0')
+                        for _, row in customer_rows.iterrows():
+                            event_type_name = row['event_type_name']
+                            value = row['value']
+                            
+                            # Try to convert value to Decimal
+                            try:
+                                value_str = str(value).replace(',', '').strip() if pd.notna(value) and str(value).strip() else '0'
+                                value_decimal = Decimal(value_str)
+                            except:
+                                value_decimal = Decimal('0')
+                            
+                            # Find matching row in tabs_bt_contract by customer_id and name/event_type_name
+                            matching_contract_rows = tabs_bt_contract[
+                                (tabs_bt_contract['customer_id'].astype(str) == customer_id) &
+                                (tabs_bt_contract['name'].astype(str) == str(event_type_name))
+                            ]
+                            
+                            if not matching_contract_rows.empty:
+                                # Get amount_1 from first matching row
+                                amount_1 = matching_contract_rows.iloc[0].get('amount_1', 0)
+                                try:
+                                    amount_1_str = str(amount_1).replace(',', '').strip() if pd.notna(amount_1) and str(amount_1).strip() else '0'
+                                    amount_1_decimal = Decimal(amount_1_str)
+                                except:
+                                    amount_1_decimal = Decimal('0')
+                                
+                                # Calculate value * amount_1 using Decimal
+                                sum_product += value_decimal * amount_1_decimal
+                        
+                        # Multiply sum by Enterprise Support % and round with ROUND_HALF_UP
+                        enterprise_pct_decimal = Decimal(str(enterprise_pct))
+                        calculated_value = float((sum_product * enterprise_pct_decimal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+                
+                # Get invoice number from contract mapping
+                contract_name = es_info.get('contract_name', '')
+                invoice_num = contract_to_invoice.get((customer_id, contract_name), 1)
+                
+                enterprise_new_rows.append({
+                    'customer_id': customer_id,
+                    'event_type_name': sku_name,
+                    'datetime': billing_date,
+                    'value': calculated_value,
+                    'differentiator': '',
+                    'invoice': invoice_num
+                })
+            
+            # Append Enterprise Support rows to output_df
+            if enterprise_new_rows:
+                enterprise_df = pd.DataFrame(enterprise_new_rows)
+                output_df = pd.concat([output_df, enterprise_df], ignore_index=True)
+                print(f"Added {len(enterprise_new_rows)} Enterprise Support row(s) to output_df")
         
         # Reset index after adding Enterprise Support rows
         output_df = output_df.reset_index(drop=True)
         
-        # Add rows for Prepaid customer_ids
-        if 'name' in tabs_bt_contract.columns:
-            # Find rows where name contains "Prepaid"
-            prepaid_rows = tabs_bt_contract[tabs_bt_contract['name'].str.contains('Prepaid', case=False, na=False)]
-            
-            if not prepaid_rows.empty:
-                # Get unique customer_ids from Prepaid rows
-                prepaid_customer_ids = prepaid_rows['customer_id'].unique()
-                prepaid_customer_ids = [str(cid) for cid in prepaid_customer_ids if pd.notna(cid)]
+        # Process Prepaid rows (if any)
+        if prepaid_rows:
+            prepaid_new_rows = []
+            for prepaid_info in prepaid_rows:
+                customer_id = prepaid_info['customer_id']
+                sku_name = prepaid_info['name']
                 
-                if prepaid_customer_ids:
-                    # Get datetime from output_df (use first row's value if available)
-                    if not output_df.empty and 'datetime' in output_df.columns:
-                        billing_date = output_df['datetime'].iloc[0]
-                    elif billing_run_date:
-                        billing_date = billing_run_date
-                    else:
-                        billing_date = (datetime.now() - timedelta(weeks=2)).strftime('%Y-%m-%d')
-                    
-                    # Create new rows for each Prepaid customer_id
-                    prepaid_new_rows = []
-                    for customer_id in prepaid_customer_ids:
-                        # Check if this customer_id + event_type_name combination already exists
-                        existing = output_df[(output_df['customer_id'] == customer_id) & 
-                                           (output_df['event_type_name'] == 'Prepaid')]
+                # Calculate value using formula: sum(value * amount_1) for all customer rows (including Enterprise Support)
+                calculated_value = 0
+                
+                # Find all rows in output_df with this customer_id (INCLUDING Enterprise Support rows)
+                customer_rows = output_df[output_df['customer_id'] == customer_id]
+                
+                if not customer_rows.empty:
+                    # Match each row to tabs_bt_contract to get amount_1
+                    # Use Decimal for precise financial calculations
+                    sum_product = Decimal('0')
+                    for _, row in customer_rows.iterrows():
+                        event_type_name = row['event_type_name']
+                        value = row['value']
                         
-                        # Only add if it doesn't already exist
-                        if existing.empty:
-                            # Calculate value using formula: sum(value * amount_1) for all customer rows (including Enterprise Support)
-                            calculated_value = 0
+                        # Try to convert value to Decimal
+                        try:
+                            value_str = str(value).replace(',', '').strip() if pd.notna(value) and str(value).strip() else '0'
+                            value_decimal = Decimal(value_str)
+                        except:
+                            value_decimal = Decimal('0')
+                        
+                        # Find matching row in tabs_bt_contract by customer_id and name/event_type_name
+                        matching_contract_rows = tabs_bt_contract[
+                            (tabs_bt_contract['customer_id'].astype(str) == customer_id) &
+                            (tabs_bt_contract['name'].astype(str) == str(event_type_name))
+                        ]
+                        
+                        if not matching_contract_rows.empty:
+                            # Get amount_1 from first matching row
+                            amount_1 = matching_contract_rows.iloc[0].get('amount_1', 0)
+                            try:
+                                amount_1_str = str(amount_1).replace(',', '').strip() if pd.notna(amount_1) and str(amount_1).strip() else '0'
+                                amount_1_decimal = Decimal(amount_1_str)
+                            except:
+                                amount_1_decimal = Decimal('0')
                             
-                            # Find all rows in output_df with this customer_id (INCLUDING Enterprise Support rows)
-                            customer_rows = output_df[output_df['customer_id'] == customer_id]
-                            
-                            if not customer_rows.empty:
-                                # Match each row to tabs_bt_contract to get amount_1
-                                sum_product = 0
-                                for _, row in customer_rows.iterrows():
-                                    event_type_name = row['event_type_name']
-                                    value = row['value']
-                                    
-                                    # Try to convert value to float
-                                    try:
-                                        value_float = float(str(value).replace(',', '').strip()) if pd.notna(value) and str(value).strip() else 0
-                                    except (ValueError, TypeError):
-                                        value_float = 0
-                                    
-                                    # Find matching row in tabs_bt_contract by customer_id and name/event_type_name
-                                    matching_contract_rows = tabs_bt_contract[
-                                        (tabs_bt_contract['customer_id'].astype(str) == customer_id) &
-                                        (tabs_bt_contract['name'].astype(str) == str(event_type_name))
-                                    ]
-                                    
-                                    if not matching_contract_rows.empty:
-                                        # Get amount_1 from first matching row
-                                        amount_1 = matching_contract_rows.iloc[0].get('amount_1', 0)
-                                        try:
-                                            amount_1_float = float(str(amount_1).replace(',', '').strip()) if pd.notna(amount_1) and str(amount_1).strip() else 0
-                                        except (ValueError, TypeError):
-                                            amount_1_float = 0
-                                        
-                                        # Calculate value * amount_1
-                                        sum_product += value_float * amount_1_float
-                                
-                                # Set calculated value as sum of all products
-                                calculated_value = sum_product
-                            
-                            new_row = {
-                                'customer_id': customer_id,
-                                'event_type_name': 'Prepaid',
-                                'datetime': billing_date,
-                                'value': calculated_value,
-                                'differentiator': ''
-                            }
-                            prepaid_new_rows.append(new_row)
+                            # Calculate value * amount_1 using Decimal
+                            sum_product += value_decimal * amount_1_decimal
                     
-                    # Append new Prepaid rows to output_df
-                    if prepaid_new_rows:
-                        prepaid_df = pd.DataFrame(prepaid_new_rows)
-                        output_df = pd.concat([output_df, prepaid_df], ignore_index=True)
-                        print(f"Added {len(prepaid_new_rows)} Prepaid row(s) to output_df")
+                    # Set calculated value with ROUND_HALF_UP to 2 decimal places
+                    calculated_value = float(sum_product.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+                
+                # Get invoice number from contract mapping
+                contract_name = prepaid_info.get('contract_name', '')
+                invoice_num = contract_to_invoice.get((customer_id, contract_name), 1)
+                
+                prepaid_new_rows.append({
+                    'customer_id': customer_id,
+                    'event_type_name': sku_name,
+                    'datetime': billing_date,
+                    'value': calculated_value,
+                    'differentiator': '',
+                    'invoice': invoice_num
+                })
+            
+            # Append Prepaid rows to output_df
+            if prepaid_new_rows:
+                prepaid_df = pd.DataFrame(prepaid_new_rows)
+                output_df = pd.concat([output_df, prepaid_df], ignore_index=True)
+                print(f"Added {len(prepaid_new_rows)} Prepaid row(s) to output_df")
         
         # Reset index after adding Prepaid rows
         output_df = output_df.reset_index(drop=True)
+        
+        # Debug: Final summary
+        print(f"\n=== DEBUG: Final Summary ===")
+        print(f"Final usage output rows: {len(output_df)}")
+        print(f"tabs_bt_contract rows: {len(tabs_bt_contract)}")
+        difference = len(tabs_bt_contract) - len(output_df)
+        print(f"Difference: {difference} rows {'✓ MATCH' if difference == 0 else '✗ MISMATCH'}")
+        if len(output_df) > 0 and 'customer_id' in output_df.columns:
+            final_unique_customers = output_df['customer_id'].nunique()
+            print(f"Unique customer_ids in final output: {final_unique_customers}")
+        if len(output_df) > 0 and 'event_type_name' in output_df.columns:
+            final_unique_skus = output_df['event_type_name'].nunique()
+            print(f"Unique SKU names in final output: {final_unique_skus}")
+        print("=" * 40 + "\n")
         
         print(f"Successfully created usage DataFrame with {len(output_df)} rows")
         return output_df
@@ -1355,3 +1528,147 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
     except Exception as e:
         print(f"Error processing raw monthly usage file: {str(e)}")
         return pd.DataFrame()
+
+
+def generate_prepaid_report_data(usage_df: pd.DataFrame, tabs_bt_contract: pd.DataFrame) -> dict:
+    """
+    Generate prepaid report data for updating Google Sheet.
+    Returns a dictionary mapping tenant_id to calculated prepaid value.
+    
+    Args:
+        usage_df: The usage DataFrame from create_tabs_ready_usage
+        tabs_bt_contract: The billing terms contract DataFrame
+        
+    Returns:
+        dict: {tenant_id: calculated_prepaid_value}
+    """
+    prepaid_values = {}
+    
+    if usage_df is None or usage_df.empty:
+        return prepaid_values
+    
+    if tabs_bt_contract is None or tabs_bt_contract.empty:
+        return prepaid_values
+    
+    # Find Prepaid rows in usage_df
+    prepaid_rows = usage_df[usage_df['event_type_name'].str.contains('Prepaid', case=False, na=False)]
+    
+    if prepaid_rows.empty:
+        return prepaid_values
+    
+    # Get tenant_id for each customer_id
+    # Create reverse mapping from customer_id to tenant_id
+    customer_to_tenant = {}
+    if 'customer_id' in tabs_bt_contract.columns and 'tenant_id' in tabs_bt_contract.columns:
+        for _, row in tabs_bt_contract.iterrows():
+            customer_id = str(row.get('customer_id', ''))
+            tenant_id = str(row.get('tenant_id', ''))
+            if customer_id and tenant_id and customer_id != 'nan':
+                customer_to_tenant[customer_id] = tenant_id
+    
+    # Extract prepaid values by tenant_id
+    for _, row in prepaid_rows.iterrows():
+        customer_id = str(row.get('customer_id', ''))
+        value = row.get('value', 0)
+        
+        if customer_id in customer_to_tenant:
+            tenant_id = customer_to_tenant[customer_id]
+            
+            try:
+                value_float = float(str(value).replace(',', '').strip()) if pd.notna(value) else 0
+            except (ValueError, TypeError):
+                value_float = 0
+            
+            if tenant_id in prepaid_values:
+                prepaid_values[tenant_id] += value_float
+            else:
+                prepaid_values[tenant_id] = value_float
+    
+    return prepaid_values
+
+
+def generate_commit_consumption_data(usage_df: pd.DataFrame, tabs_bt_contract: pd.DataFrame) -> dict:
+    """
+    Generate commit consumption report data for updating Google Sheet.
+    Returns a dictionary mapping (tenant_id, contract_id) to total consumption amount.
+    Excludes Prepaid rows.
+    
+    Calculates: sum(amount_1 * meter_value) per customer/contract
+    
+    Args:
+        usage_df: The usage DataFrame from create_tabs_ready_usage
+        tabs_bt_contract: The billing terms contract DataFrame
+        
+    Returns:
+        dict: {(tenant_id, contract_id): total_amount}
+    """
+    consumption_values = {}
+    
+    if usage_df is None or usage_df.empty:
+        return consumption_values
+    
+    if tabs_bt_contract is None or tabs_bt_contract.empty:
+        return consumption_values
+    
+    # Exclude Prepaid and Enterprise Support rows
+    filtered_usage = usage_df[
+        ~usage_df['event_type_name'].str.contains('Prepaid', case=False, na=False)
+    ]
+    
+    if filtered_usage.empty:
+        return consumption_values
+    
+    # Create mapping from customer_id to (tenant_id, contract_name)
+    customer_to_info = {}
+    if 'customer_id' in tabs_bt_contract.columns:
+        for _, row in tabs_bt_contract.iterrows():
+            customer_id = str(row.get('customer_id', ''))
+            tenant_id = str(row.get('tenant_id', ''))
+            contract_name = str(row.get('contract_name', ''))
+            if customer_id and customer_id != 'nan':
+                customer_to_info[customer_id] = (tenant_id, contract_name)
+    
+    # Create lookup for amount_1 from tabs_bt_contract
+    # Key: (customer_id, name) -> amount_1
+    amount_lookup = {}
+    for _, row in tabs_bt_contract.iterrows():
+        customer_id = str(row.get('customer_id', ''))
+        name = str(row.get('name', ''))
+        amount_1 = row.get('amount_1', 0)
+        
+        if customer_id and name and customer_id != 'nan':
+            try:
+                amount_float = float(str(amount_1).replace(',', '').strip()) if pd.notna(amount_1) else 0
+            except (ValueError, TypeError):
+                amount_float = 0
+            amount_lookup[(customer_id, name)] = amount_float
+    
+    # Calculate consumption values
+    for _, row in filtered_usage.iterrows():
+        customer_id = str(row.get('customer_id', ''))
+        event_type_name = str(row.get('event_type_name', ''))
+        meter_value = row.get('value', 0)
+        
+        if customer_id not in customer_to_info:
+            continue
+        
+        tenant_id, contract_name = customer_to_info[customer_id]
+        
+        # Get amount_1 for this (customer_id, event_type_name) combination
+        amount_1 = amount_lookup.get((customer_id, event_type_name), 0)
+        
+        try:
+            meter_float = float(str(meter_value).replace(',', '').strip()) if pd.notna(meter_value) else 0
+        except (ValueError, TypeError):
+            meter_float = 0
+        
+        # Calculate amount_1 * meter_value
+        product = amount_1 * meter_float
+        
+        key = (tenant_id, contract_name)
+        if key in consumption_values:
+            consumption_values[key] += product
+        else:
+            consumption_values[key] = product
+    
+    return consumption_values
