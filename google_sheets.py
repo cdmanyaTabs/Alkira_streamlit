@@ -81,7 +81,7 @@ def update_prepaid_sheet(prepaid_values: dict) -> dict:
         # Column A (index 0) = Last Updated (timestamp)
         
         tenant_id_col = 1  # Column B (0-indexed)
-        prepaid_amount_col = 6  # Column G (0-indexed)
+        prepaid_amount_col = 7  # Column H (0-indexed) - Prepaid Amount Consumed
         timestamp_col = 0  # Column A (0-indexed)
         
         # Current timestamp
@@ -98,7 +98,7 @@ def update_prepaid_sheet(prepaid_values: dict) -> dict:
             tenant_id = str(row[tenant_id_col]).strip()
             
             if tenant_id in prepaid_values:
-                # Get existing value in Column G
+                # Get existing value in Column H (Prepaid Amount Consumed)
                 existing_value = 0
                 if len(row) > prepaid_amount_col and row[prepaid_amount_col]:
                     try:
@@ -110,7 +110,7 @@ def update_prepaid_sheet(prepaid_values: dict) -> dict:
                 new_value = existing_value + prepaid_values[tenant_id]
                 
                 # Queue updates for Column G and Column A
-                # Column G (prepaid amount)
+                # Column H (Prepaid Amount Consumed)
                 updates.append({
                     'range': f'{_col_letter(prepaid_amount_col + 1)}{row_idx}',
                     'values': [[round(new_value, 2)]]

@@ -297,6 +297,8 @@ def main():
                             tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise)
                             contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
                             st.success(f"✓ Step 5: Created contracts ({contracts_created} contracts)")
+                            results['tabs_bt_contract'] = tabs_bt_contract
+                            results['billing_run_date'] = billing_run_date
                         
                         # Step 6: Create Invoices
                         with st.spinner("Step 6/7: Creating invoices and pushing to API..."):
