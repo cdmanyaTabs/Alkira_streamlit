@@ -1039,7 +1039,7 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         billing_run_date: Optional billing run date in YYYY-MM-DD format (defaults to date two weeks ago if not provided)
         
     Returns:
-        pd.DataFrame: DataFrame with columns: customer_id, event_type_name, datetime, value, differentiator, invoice
+        pd.DataFrame: DataFrame with columns: customer_id, event_type_id, event_type_name, datetime, value, differentiator, invoice
     """
     if raw_monthly_usage_file is None:
         return pd.DataFrame()
@@ -1185,7 +1185,9 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         customer_id_to_tenant_id = {v: k for k, v in tenant_to_customer_id.items()}
         
         # Get set of valid (customer_id, sku_name, contract_name) from tabs_bt_contract for filtering
+        # Also create mapping for event_type_id lookup
         valid_billing_terms = set()
+        event_type_id_map = {}  # (customer_id, sku_name, contract_name) -> event_to_track
         enterprise_support_rows = []
         prepaid_rows = []
         
@@ -1193,9 +1195,13 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             customer_id = str(bt_row.get('customer_id', ''))
             sku_name = str(bt_row.get('name', ''))
             contract_name = str(bt_row.get('contract_name', '')) if 'contract_name' in bt_row.index else ''
+            event_to_track = str(bt_row.get('event_to_track', '')) if pd.notna(bt_row.get('event_to_track')) else ''
             
             if not customer_id or not sku_name or customer_id == 'nan' or sku_name == 'nan':
                 continue
+            
+            # Store event_type_id mapping for all billing terms
+            event_type_id_map[(customer_id, sku_name, contract_name)] = event_to_track
             
             # Check if this is Enterprise Support or Prepaid row
             is_enterprise_support = 'Enterprise Support' in sku_name or sku_name == 'Enterprise Support'
@@ -1207,6 +1213,7 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                     'customer_id': customer_id,
                     'name': sku_name,
                     'contract_name': contract_name,
+                    'event_type_id': event_to_track,
                     'bt_row': bt_row
                 })
             elif is_prepaid:
@@ -1215,6 +1222,7 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                     'customer_id': customer_id,
                     'name': sku_name,
                     'contract_name': contract_name,
+                    'event_type_id': event_to_track,
                     'bt_row': bt_row
                 })
             else:
@@ -1237,8 +1245,12 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             # Get invoice number from mapping
             invoice_num = invoice_mapping.get((tenant_id, tenant_name), 1)
             
+            # Get event_type_id from mapping
+            event_type_id = event_type_id_map.get((customer_id, sku_name, contract), '')
+            
             output_rows.append({
                 'customer_id': customer_id,
+                'event_type_id': event_type_id,
                 'event_type_name': sku_name,
                 'datetime': billing_date,
                 'value': meter_value,
@@ -1419,8 +1431,12 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 contract_name = es_info.get('contract_name', '')
                 invoice_num = contract_to_invoice.get((customer_id, contract_name), 1)
                 
+                # Get event_type_id from stored value
+                event_type_id = es_info.get('event_type_id', '')
+                
                 enterprise_new_rows.append({
                     'customer_id': customer_id,
+                    'event_type_id': event_type_id,
                     'event_type_name': sku_name,
                     'datetime': billing_date,
                     'value': calculated_value,
@@ -1490,8 +1506,12 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 contract_name = prepaid_info.get('contract_name', '')
                 invoice_num = contract_to_invoice.get((customer_id, contract_name), 1)
                 
+                # Get event_type_id from stored value
+                event_type_id = prepaid_info.get('event_type_id', '')
+                
                 prepaid_new_rows.append({
                     'customer_id': customer_id,
+                    'event_type_id': event_type_id,
                     'event_type_name': sku_name,
                     'datetime': billing_date,
                     'value': calculated_value,

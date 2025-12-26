@@ -3,6 +3,7 @@ import streamlit as st
 import requests
 import io
 import json
+import uuid
 
 def get_customer_custom_field():
     url = f"https://integrators.prod.api.tabsplatform.com/v3/customers/custom-fields"
@@ -11,6 +12,7 @@ def get_customer_custom_field():
     }
     response = requests.get(url, headers=headers)
     return response.json()
+
 def get_all_customers():
     url = f"https://integrators.prod.api.tabsplatform.com/v3/customers?limit=10000"
     headers = {
@@ -29,43 +31,6 @@ def get_all_customers():
                 return data
     return []
 
-    # Example response:
-    #  "payload": {
-    # "data": [
-    #   {
-    #     "id": "a8e03b2b-8b20-4eb7-bdac-da1c1447dab2",
-    #     "name": "Commit Consume Customer No. 3",
-    #     "parentCustomerId": null,
-    #     "secondaryBillingContacts": [],
-    #     "externalIds": [],
-    #     "defaultCurrency": "USD",
-    #     "lastUpdatedAt": "2024-08-15T19:27:52.828Z",
-       # "customFields": [
-        #   {
-        #     "id": "3ecee77e-eba1-4142-acc2-42290b1958b5",
-        #     "manufacturerCustomFieldId": "6ddd8eff-818d-4462-a369-3912576b3b84",
-        #     "customFieldName": "Tenant ID",
-        #     "customFieldValue": "449"
-        #   }
-        # ]    #   },
-    #   {
-    #     "id": "a22deb49-03d1-4490-9907-da2fe883d8cd",
-    #     "name": "Commit Consume Customer No. 4",
-    #     "parentCustomerId": null,
-    #     "secondaryBillingContacts": [],
-    #     "externalIds": [],
-    #     "defaultCurrency": "USD",
-    #     "lastUpdatedAt": "2024-08-15T19:27:34.659Z",
-        # "customFields": [
-        #   {
-        #     "id": "3ecee77e-eba1-4142-acc2-42290b1958b5",
-        #     "manufacturerCustomFieldId": "6ddd8eff-818d-4462-a369-3912576b3b84",
-        #     "customFieldName": "Tenant ID",
-        #     "customFieldValue": "449"
-        #   }
-        # ]
-    #   },
-
 def get_event_ids():
     url = "https://integrators.prod.api.tabsplatform.com/v3/events/types?limit=1000"
     headers = {
@@ -74,22 +39,6 @@ def get_event_ids():
     response = requests.get(url, headers=headers)
     return pd.DataFrame(response.json().get("payload",{}).get("data",[]))
  
-#    # Example response:
-#    {
-#   "payload": {
-#     "data": [
-#       {
-#         "id": "0000802f-5b90-4610-8434-99ac8dae5497",
-#         "name": "GCP Interconnect - L"
-#       },
-#       {
-#         "id": "00d41157-2098-4831-9043-1ca39a97f719",
-#         "name": "PAN - BYOL - M"
-#       },
-#       {
-#         "id": "012b7a24-3828-4c48-ab30-2a0ea3cd3602",
-#         "name": "FortiGate - BYOL - M"
-#       }]}}    
 
 def get_integration_items():
     url = "https://integrators.prod.api.tabsplatform.com/v3/items?limit=1000"
@@ -98,31 +47,6 @@ def get_integration_items():
     }
     response = requests.get(url, headers=headers)
     return pd.DataFrame(response.json().get("payload",{}).get("data",[]))
-    # Example response:
-#     {
-#   "payload": {
-#     "data": [
-#       {
-#         "id": "3b96a3da-480e-4d22-a524-52c3a14b3037",
-#         "name": "Additional Alkira Datastore - 100G",
-#         "externalIds": [
-#           {
-#             "type": "NETSUITE",
-#             "id": "110"
-#           }
-#         ]
-#       },
-#       {
-#         "id": "eabe1261-76aa-492c-bbf9-ee0cf3153b04",
-#         "name": "Akamai Prolexic - 2L",
-#         "externalIds": [
-#           {
-#             "type": "NETSUITE",
-#             "id": "1920"
-#           }
-#         ]
-#       },
-#       ]}}
 
 def find_contracts(customer_id, contract_name):
     contracts = st.session_state["all_contracts"]
@@ -180,75 +104,6 @@ def create_contract(customer_id, contract_name):
         ret = None
     return ret
 
-    
-# ============================================================================
-# OLD IMPLEMENTATION - COMMENTED OUT
-# ============================================================================
-# def push_bt(csv_file_data, merchant_name='alkira'):
-#     """
-#     Push CSV file data to bulk-create-billing-schedules endpoint as multipart/form-data.
-#     
-#     Args:
-#         csv_file_data: Tuple (filename, file_data, content_type) or file-like object for CSV upload
-#         merchant_name: Merchant name for the endpoint (default: 'alkira')
-#         
-#     Returns:
-#         Response object from the API
-#     """
-#     #prep the url
-#     url = f"https://integrators.prod.api.tabsplatform.com/v16/secrets/merchant/{merchant_name}/bulk-create-billing-schedules"
-# 
-#     #prep the header
-#     headers = {
-#         "Authorization": f"{st.session_state['tabs_api_key']}"
-#     }
-# 
-#     # Prepare files for multipart/form-data upload
-#     # csv_file_data should be a tuple of (filename, file_data, content_type) or file-like object
-#     if isinstance(csv_file_data, tuple):
-#         files = {'file': csv_file_data}
-#     else:
-#         # If it's a file-like object, wrap it with a filename
-#         files = {'file': ('billing_schedules.csv', csv_file_data, 'text/csv')}
-#     
-#     # Send CSV file as multipart/form-data
-#     response = requests.post(url, headers=headers, files=files)
-#     
-#     # Print status of push_bt API call
-#     if response.status_code == 201:
-#         print(f"✓ push_bt API call successful (HTTP {response.status_code})")
-#         try:
-#             response_data = response.json()
-#             # Debug: Print the full response structure
-#             print(f"  Full API response: {response_data}")
-#             
-#             # Check if billingTermIds is nested under payload or data
-#             billing_term_ids = response_data.get('billingTermIds', [])
-#             if not billing_term_ids and 'payload' in response_data:
-#                 payload = response_data.get('payload', {})
-#                 billing_term_ids = payload.get('billingTermIds', [])
-#             if not billing_term_ids and 'data' in response_data:
-#                 data = response_data.get('data', {})
-#                 billing_term_ids = data.get('billingTermIds', [])
-#             
-#             if billing_term_ids:
-#                 print(f"  Created {len(billing_term_ids)} billing term(s)")
-#             else:
-#                 print(f"  Warning: No billingTermIds in response")
-#                 print(f"  Response keys: {list(response_data.keys())}")
-#         except Exception as e:
-#             print(f"  Warning: Could not parse response JSON: {str(e)}")
-#             print(f"  Response text: {response.text[:500] if hasattr(response, 'text') else 'N/A'}")
-#     else:
-#         print(f"✗ push_bt API call failed (HTTP {response.status_code})")
-#         try:
-#             error_data = response.json()
-#             error_msg = error_data.get('message', error_data.get('error', 'Unknown error'))
-#             print(f"  Error details: {error_msg}")
-#         except:
-#             print(f"  Error details: {response.text if hasattr(response, 'text') else 'No error details available'}")
-#     
-#     return response
 
 def push_bt(csv_file_data, merchant_name='alkira'):
     """
@@ -489,3 +344,136 @@ def push_bt(csv_file_data, merchant_name='alkira'):
     # Return success if at least some obligations were created
     status_code = 201 if successful_count > 0 else 400
     return MockResponse(status_code, obligation_ids, errors)
+
+
+# ============================================================
+# Tabs Usage API (Beta) - Usage Events
+# Reference: https://docs.tabsplatform.com/reference/ingestevent
+# ============================================================
+
+USAGE_EVENTS_API_URL = "https://usage-events.prod.api.tabsplatform.com/v1/events"
+
+
+def create_usage_event(event_data: dict, idempotency_key: str = None) -> dict:
+    """
+    Create a single usage event using the Tabs Usage API (Beta).
+    
+    Args:
+        event_data: Dictionary containing event data with keys:
+            - customer_id: Tabs customer ID
+            - event_type_id: Event type ID (from event_to_track)
+            - datetime: Event datetime (ISO format or YYYY-MM-DD)
+            - value: Numeric value for the event
+            - differentiator: Optional differentiator string
+            - invoice_split_key: Optional key for invoice splitting
+        idempotency_key: Optional unique key for idempotency (auto-generated if not provided)
+    
+    Returns:
+        dict: Response with success status and message
+    """
+    try:
+        # Generate idempotency key if not provided
+        if idempotency_key is None:
+            idempotency_key = str(uuid.uuid4())
+        
+        headers = {
+            "Authorization": f"{st.session_state['tabs_api_key']}",
+            "Content-Type": "application/json"
+        }
+        
+        # Build the event payload
+        # Convert datetime to ISO 8601 format if it's just a date
+        datetime_value = event_data.get('datetime', '')
+        if datetime_value and 'T' not in str(datetime_value):
+            datetime_value = f"{datetime_value}T00:00:00Z"
+        
+        payload = {
+            "customerId": event_data.get('customer_id'),
+            "eventTypeId": event_data.get('event_type_id'),
+            "datetime": datetime_value,
+            "value": event_data.get('value'),
+            "differentiator": event_data.get('differentiator', ''),
+            "idempotencyKey": idempotency_key,
+            "invoiceSplitKey": event_data.get('invoice_split_key', '')
+        }
+        
+        # Debug: Print request details
+        print(f"\n=== DEBUG: Usage Event API Request ===")
+        print(f"URL: {USAGE_EVENTS_API_URL}")
+        print(f"Payload: {payload}")
+        
+        response = requests.post(USAGE_EVENTS_API_URL, headers=headers, json=payload)
+        
+        # Debug: Print response details
+        print(f"Response Status: {response.status_code}")
+        print(f"Response Body: {response.text[:500] if response.text else 'Empty'}")
+        print("=" * 40)
+        
+        if response.status_code in [200, 201]:
+            return {
+                "success": True,
+                "message": "Event created successfully",
+                "response": response.json() if response.text else {}
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Failed to create event: {response.status_code}",
+                "error": response.text
+            }
+            
+    except Exception as e:
+        print(f"Exception in create_usage_event: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error creating usage event: {str(e)}"
+        }
+
+
+def create_usage_events_bulk(events: list) -> dict:
+    """
+    Create multiple usage events in bulk using the Tabs Usage API (Beta).
+    Each event is sent individually with a unique idempotency key.
+    
+    Args:
+        events: List of event dictionaries, each containing:
+            - customer_id: Tabs customer ID
+            - event_type_name: Name of the event type (SKU)
+            - datetime: Event datetime (ISO format or YYYY-MM-DD)
+            - value: Numeric value for the event
+            - differentiator: Optional differentiator string
+    
+    Returns:
+        dict: Summary of results with success/failure counts
+    """
+    results = {
+        "total": len(events),
+        "success_count": 0,
+        "failure_count": 0,
+        "successes": [],
+        "failures": []
+    }
+    
+    for i, event_data in enumerate(events):
+        # Generate unique idempotency key for each event
+        idempotency_key = str(uuid.uuid4())
+        
+        result = create_usage_event(event_data, idempotency_key)
+        
+        if result.get("success"):
+            results["success_count"] += 1
+            results["successes"].append({
+                "index": i,
+                "customer_id": event_data.get('customer_id'),
+                "event_type_name": event_data.get('event_type_name')
+            })
+        else:
+            results["failure_count"] += 1
+            results["failures"].append({
+                "index": i,
+                "customer_id": event_data.get('customer_id'),
+                "event_type_name": event_data.get('event_type_name'),
+                "error": result.get("message")
+            })
+    
+    return results

@@ -397,9 +397,59 @@ def main():
                     mime="text/csv"
                 )
                 
-                # Google Sheets Update Buttons
-                st.markdown("### Update Google Sheets")
+                # Push Usage Events to Tabs button
+                st.markdown("### Push Usage Events to Tabs")
+                if st.button("Push Usage Events to Tabs", type="primary"):
+                    try:
+                        from api import create_usage_events_bulk
+                        
+                        # Convert usage_df to list of event dictionaries
+                        events_list = []
+                        for _, row in usage_df.iterrows():
+                            event = {
+                                'customer_id': str(row.get('customer_id', '')),
+                                'event_type_id': str(row.get('event_type_id', '')),
+                                'datetime': str(row.get('datetime', '')),
+                                'value': float(row.get('value', 0)) if pd.notna(row.get('value')) else 0,
+                                'differentiator': str(row.get('differentiator', '')),
+                                'invoice_split_key': str(row.get('invoice', ''))
+                            }
+                            events_list.append(event)
+                        
+                        if events_list:
+                            with st.spinner(f"Pushing {len(events_list)} usage events to Tabs..."):
+                                result = create_usage_events_bulk(events_list)
+                            
+                            # Check success/failure counts from bulk response
+                            success_count = result.get('success_count', 0)
+                            failure_count = result.get('failure_count', 0)
+                            total = result.get('total', 0)
+                            
+                            if failure_count == 0:
+                                st.success(f"✅ Successfully pushed {success_count}/{total} usage events to Tabs")
+                            elif success_count > 0:
+                                st.warning(f"⚠️ Pushed {success_count}/{total} events. {failure_count} failed.")
+                                if result.get('failures'):
+                                    with st.expander("View Errors"):
+                                        for failure in result.get('failures', []):
+                                            st.error(f"Event {failure.get('index')}: {failure.get('error')}")
+                            else:
+                                st.error(f"❌ Failed to push events. {failure_count}/{total} failed.")
+                                if result.get('failures'):
+                                    with st.expander("View Errors"):
+                                        for failure in result.get('failures', []):
+                                            st.error(f"Event {failure.get('index')}: {failure.get('error')}")
+                        else:
+                            st.warning("No usage events to push")
+                    except Exception as e:
+                        st.error(f"Error pushing usage events: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
                 
+                # Google Sheets Update Buttons
+                st.markdown("### Update Google Sheets Reports")
+                st.write("Reports can be found here: https://docs.google.com/spreadsheets/d/10Znr32hQQRS1qOcVQIqAtg9PU_6ht5z7WjfXyaL47i4/edit?usp=sharing !")
+
                 col1, col2 = st.columns(2)
                 
                 with col1:
