@@ -385,7 +385,7 @@ def create_usage_event(event_data: dict, idempotency_key: str = None) -> dict:
         # Convert datetime to ISO 8601 format if it's just a date
         datetime_value = event_data.get('datetime', '')
         if datetime_value and 'T' not in str(datetime_value):
-            datetime_value = f"{datetime_value}T00:00:00Z"
+            datetime_value = f"{datetime_value}T07:00:00Z"
         
         payload = {
             "customerId": event_data.get('customer_id'),
