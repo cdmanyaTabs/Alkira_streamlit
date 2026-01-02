@@ -90,8 +90,8 @@ def price_book_transformation(zip_file, billing_run_date=None):
                     required_columns = ['Category', 'SKU Name', 'SKU Description', 'Unit of Measure', 
                                        'On-Demand Rate', 'Disc', 'NET RATE', 'Net Terms']
                     
-                    # Create case-insensitive mapping
-                    df_columns_lower = {col.lower(): col for col in df_full.columns}
+                    # Create case-insensitive mapping (convert to string first for numeric column names)
+                    df_columns_lower = {str(col).lower(): col for col in df_full.columns}
                     
                     # Find matching columns and check for missing ones
                     matched_columns = []
