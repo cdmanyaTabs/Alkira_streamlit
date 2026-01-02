@@ -451,9 +451,15 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
             print(f"Unsupported file type: {file_extension}")
             return filtered_df
         
-        # Check if required columns exist in raw usage file (including Contract)
-        required_columns = ['Tenant ID', 'SKU Name', 'Contract']
+        # Check if required columns exist in raw usage file (including Contract/SFDC#)
+        # Accept either 'Contract' or 'SFDC#' as the contract column name
+        contract_col = 'Contract' if 'Contract' in raw_usage_df.columns else ('SFDC#' if 'SFDC#' in raw_usage_df.columns else None)
+        
+        required_columns = ['Tenant ID', 'SKU Name']
         missing_columns = [col for col in required_columns if col not in raw_usage_df.columns]
+        
+        if contract_col is None:
+            missing_columns.append('Contract or SFDC#')
         
         if missing_columns:
             print(f"Error: Missing required columns in raw monthly usage file: {', '.join(missing_columns)}")
@@ -463,7 +469,7 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         # Convert to string and handle any NaN values
         raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(str)
         raw_usage_df['SKU Name'] = raw_usage_df['SKU Name'].astype(str)
-        raw_usage_df['Contract'] = raw_usage_df['Contract'].astype(str)
+        raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
         
         # Create a set of tuples for matching (Tenant ID, SKU Name, Contract)
         matching_tuples = set(zip(raw_usage_df['Tenant ID'], raw_usage_df['SKU Name'], raw_usage_df['Contract']))
@@ -1070,9 +1076,15 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             print(f"Unsupported file type: {file_extension}")
             return pd.DataFrame()
         
-        # Check if required columns exist in raw usage file (including Contract and Tenant Name)
-        required_columns = ['Tenant ID', 'Tenant Name', 'SKU Name', 'Meter', 'Contract']
+        # Check if required columns exist in raw usage file (including Contract/SFDC# and Tenant Name)
+        # Accept either 'Contract' or 'SFDC#' as the contract column name
+        contract_col = 'Contract' if 'Contract' in raw_usage_df.columns else ('SFDC#' if 'SFDC#' in raw_usage_df.columns else None)
+        
+        required_columns = ['Tenant ID', 'Tenant Name', 'SKU Name', 'Meter']
         missing_columns = [col for col in required_columns if col not in raw_usage_df.columns]
+        
+        if contract_col is None:
+            missing_columns.append('Contract or SFDC#')
         
         if missing_columns:
             print(f"Error: Missing required columns in raw monthly usage file: {', '.join(missing_columns)}")
@@ -1081,7 +1093,7 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         # Convert columns to string for matching
         raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(str)
         raw_usage_df['Tenant Name'] = raw_usage_df['Tenant Name'].astype(str)
-        raw_usage_df['Contract'] = raw_usage_df['Contract'].astype(str)
+        raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
         
         # Get all customers from API to map tenant_id to Tabs Customer ID
         try:
