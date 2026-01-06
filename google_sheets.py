@@ -161,11 +161,10 @@ def update_commit_consumption_sheet(consumption_values: dict, billing_date: str)
         if len(all_data) < 2:
             return {"success": False, "message": "Sheet has no data rows"}
         
-        # Calculate target date (billing_date + 1 month)
+        # Calculate target date (use billing_date directly)
         # Sheet column headers use format like "Oct-2023", "Nov-2023", "Dec-2024" (MMM-YYYY)
         billing_dt = datetime.strptime(billing_date, '%Y-%m-%d')
-        target_dt = billing_dt + relativedelta(months=1)
-        target_date = target_dt.strftime('%b-%Y')  # e.g., "Dec-2024"
+        target_date = billing_dt.strftime('%b-%Y')  # e.g., "Dec-2024"
         
         # Find the column with the target date in header row
         header_row = all_data[0]

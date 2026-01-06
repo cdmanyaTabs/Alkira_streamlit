@@ -105,6 +105,118 @@ def create_contract(customer_id, contract_name):
     return ret
 
 
+def mark_contract_processed(contract_id: str) -> dict:
+    """
+    Mark a contract as processed using the Tabs API.
+    
+    Args:
+        contract_id: The contract ID to mark as processed
+        
+    Returns:
+        dict: Result with success status and message
+    """
+    url = f"https://integrators.prod.api.tabsplatform.com/v3/contracts/{contract_id}/actions"
+    headers = {
+        "Authorization": f"{st.session_state['tabs_api_key']}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "action": "MARK_AS_PROCESSED"
+    }
+    
+    try:
+        print(f"\n=== DEBUG: Mark Contract Processed ===")
+        print(f"URL: {url}")
+        print(f"Payload: {payload}")
+        
+        response = requests.post(url, headers=headers, json=payload)
+        
+        print(f"Response Status: {response.status_code}")
+        print(f"Response Body: {response.text[:500] if response.text else 'Empty'}")
+        print("=" * 40)
+        
+        if response.status_code in [200, 201]:
+            return {
+                "success": True,
+                "message": f"Contract {contract_id} marked as processed",
+                "response": response.json() if response.text else {}
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Failed to mark contract as processed: {response.status_code}",
+                "error": response.text
+            }
+    except Exception as e:
+        print(f"Exception in mark_contract_processed: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error marking contract as processed: {str(e)}"
+        }
+
+
+def get_invoices(customer_id: str, contract_id: str) -> dict:
+    """
+    Get invoices from Tabs API filtered by customer ID and contract ID.
+    
+    Args:
+        customer_id: The Tabs customer ID
+        contract_id: The contract ID
+        
+    Returns:
+        dict: Result with success status, invoices data, and total amount
+    """
+    # Build filter string with AND logic using comma-separated filters
+    filter_str = f'customerId:eq:"{customer_id}",contractId:eq:"{contract_id}"'
+    url = f"https://integrators.prod.api.tabsplatform.com/v3/invoices?filter={filter_str}"
+    
+    headers = {
+        "Authorization": f"{st.session_state['tabs_api_key']}"
+    }
+    
+    try:
+        print(f"\n=== DEBUG: Get Invoices ===")
+        print(f"URL: {url}")
+        
+        response = requests.get(url, headers=headers)
+        
+        print(f"Response Status: {response.status_code}")
+        print(f"Response Body: {response.text[:500] if response.text else 'Empty'}")
+        print("=" * 40)
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            invoices = response_data.get("payload", {}).get("data", [])
+            
+            # Calculate total from all invoices
+            total_amount = 0
+            for invoice in invoices:
+                total_amount += float(invoice.get("total", 0))
+            
+            return {
+                "success": True,
+                "message": f"Found {len(invoices)} invoice(s)",
+                "invoices": invoices,
+                "total_amount": total_amount
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Failed to get invoices: {response.status_code}",
+                "error": response.text,
+                "invoices": [],
+                "total_amount": 0
+            }
+    except Exception as e:
+        print(f"Exception in get_invoices: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Error getting invoices: {str(e)}",
+            "invoices": [],
+            "total_amount": 0
+        }
+
+
 def push_bt(csv_file_data, merchant_name='alkira'):
     """
     Push billing terms to Tabs API using the new v3/contracts/{id}/obligations endpoint.

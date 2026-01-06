@@ -66,8 +66,9 @@ def price_book_transformation(zip_file, billing_run_date=None):
             # Format: 356_Borgwarner_SFDC#00000323.xlsx or 227-SitaQantas_SFDC#00000312.xlsx
             tenant_match = re.search(r'^(\d+)[_-]', basename) or re.search(r'price_by_sku_(\d+)_', basename)
             
-            # Extract contract_name: Pattern like SFDC#00000323 (before file extension)
-            contract_match = re.search(r'(SFDC#\d+)\.\w+$', basename, re.IGNORECASE)
+            # Extract contract_name: Pattern like SFDC#00000323 or SFDC#00000131+SFDC#00000185 (before file extension)
+            # Supports single or multiple SFDC# patterns joined by +
+            contract_match = re.search(r'(SFDC#\d+(?:\+SFDC#\d+)*)\.\w+$', basename, re.IGNORECASE)
             
             if tenant_match:
                 tenant_id = tenant_match.group(1)
@@ -211,9 +212,16 @@ def price_book_transformation(zip_file, billing_run_date=None):
                     if not tenant_id_value:
                         for field in custom_fields:
                             if field.get('customFieldName') == 'Account #':
-                                tenant_id_value = field.get('customFieldValue')
-                                if tenant_id_value:
-                                    tenant_to_customer_id[tenant_id_value] = tabs_customer_id
+                                account_value = field.get('customFieldValue')
+                                if account_value:
+                                    # Handle multiple tenant IDs separated by + (e.g., "123 + 456")
+                                    if '+' in str(account_value):
+                                        for part in str(account_value).split('+'):
+                                            part = part.strip()
+                                            if part:
+                                                tenant_to_customer_id[part] = tabs_customer_id
+                                    else:
+                                        tenant_to_customer_id[str(account_value)] = tabs_customer_id
                                     break
                 
                 # Collect all unique tenant_ids from the files
@@ -471,8 +479,13 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         raw_usage_df['SKU Name'] = raw_usage_df['SKU Name'].astype(str)
         raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
         
-        # Create a set of tuples for matching (Tenant ID, SKU Name, Contract)
-        matching_tuples = set(zip(raw_usage_df['Tenant ID'], raw_usage_df['SKU Name'], raw_usage_df['Contract']))
+        # Create a set of tuples for matching (Tenant ID, SKU Name lowercase, Contract)
+        # SKU Name is lowercased for case-insensitive matching
+        matching_tuples = set(zip(
+            raw_usage_df['Tenant ID'], 
+            raw_usage_df['SKU Name'].str.lower(),
+            raw_usage_df['Contract']
+        ))
         
         # Make a copy of filtered_df to avoid modifying the original
         filtered_df_copy = filtered_df.copy()
@@ -483,9 +496,9 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         filtered_df_copy['contract_name'] = filtered_df_copy['contract_name'].astype(str) if 'contract_name' in filtered_df_copy.columns else ''
         
         # Filter filtered_df to only include rows where (tenant_id, name, contract_name) matches
-        # any combination in the raw usage file
+        # any combination in the raw usage file (case-insensitive for SKU name)
         mask = filtered_df_copy.apply(
-            lambda row: (str(row['tenant_id']), str(row['name']), str(row.get('contract_name', ''))) in matching_tuples,
+            lambda row: (str(row['tenant_id']), str(row['name']).lower(), str(row.get('contract_name', ''))) in matching_tuples,
             axis=1
         )
         
@@ -1119,9 +1132,16 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 if not tenant_id_value:
                     for field in custom_fields:
                         if field.get('customFieldName') == 'Account #':
-                            tenant_id_value = field.get('customFieldValue')
-                            if tenant_id_value:
-                                tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
+                            account_value = field.get('customFieldValue')
+                            if account_value:
+                                # Handle multiple tenant IDs separated by + (e.g., "123 + 456")
+                                if '+' in str(account_value):
+                                    for part in str(account_value).split('+'):
+                                        part = part.strip()
+                                        if part:
+                                            tenant_to_customer_id[part] = tabs_customer_id
+                                else:
+                                    tenant_to_customer_id[str(account_value)] = tabs_customer_id
                                 break
             
             # Map Tenant ID to customer_id in raw usage
@@ -1354,9 +1374,16 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                                     if not tenant_id_value:
                                         for field in custom_fields:
                                             if field.get('customFieldName') == 'Account #':
-                                                tenant_id_value = field.get('customFieldValue')
-                                                if tenant_id_value:
-                                                    tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
+                                                account_value = field.get('customFieldValue')
+                                                if account_value:
+                                                    # Handle multiple tenant IDs separated by + (e.g., "123 + 456")
+                                                    if '+' in str(account_value):
+                                                        for part in str(account_value).split('+'):
+                                                            part = part.strip()
+                                                            if part:
+                                                                tenant_to_customer_id[part] = tabs_customer_id
+                                                    else:
+                                                        tenant_to_customer_id[str(account_value)] = tabs_customer_id
                                                     break
                                 
                                 # Create mapping: customer_id -> Enterprise Support %

@@ -403,16 +403,24 @@ def main():
                     try:
                         from api import create_usage_events_bulk
                         
-                        # Convert usage_df to list of event dictionaries
+                        # Exclude Prepaid rows from usage events push
+                        filtered_usage = usage_df[~usage_df['event_type_name'].str.contains('Prepaid', case=False, na=False)]
+                        
+                        # Convert filtered usage to list of event dictionaries
                         events_list = []
-                        for _, row in usage_df.iterrows():
+                        for _, row in filtered_usage.iterrows():
+                            # invoice_split_key should be blank for the first one (invoice=1)
+                            # and only populated for 2nd+ (invoice=2, 3, etc.)
+                            invoice_val = row.get('invoice', '')
+                            invoice_split_key = '' if str(invoice_val) == '1' else str(invoice_val)
+                            
                             event = {
                                 'customer_id': str(row.get('customer_id', '')),
                                 'event_type_id': str(row.get('event_type_id', '')),
                                 'datetime': str(row.get('datetime', '')),
                                 'value': float(row.get('value', 0)) if pd.notna(row.get('value')) else 0,
                                 'differentiator': str(row.get('differentiator', '')),
-                                'invoice_split_key': str(row.get('invoice', ''))
+                                'invoice_split_key': invoice_split_key
                             }
                             events_list.append(event)
                         
@@ -427,6 +435,36 @@ def main():
                             
                             if failure_count == 0:
                                 st.success(f"✅ Successfully pushed {success_count}/{total} usage events to Tabs")
+                                
+                                # Mark all unique contracts as processed (excluding Prepaid)
+                                try:
+                                    from api import mark_contract_processed
+                                    tabs_bt_contract = results.get('tabs_bt_contract')
+                                    
+                                    if tabs_bt_contract is not None and not tabs_bt_contract.empty:
+                                        # Filter out Prepaid rows
+                                        non_prepaid_bt = tabs_bt_contract[~tabs_bt_contract['name'].str.contains('Prepaid', case=False, na=False)]
+                                        unique_contracts = non_prepaid_bt['contract_id'].dropna().unique()
+                                        
+                                        mark_success = 0
+                                        mark_fail = 0
+                                        
+                                        with st.spinner(f"Marking {len(unique_contracts)} contract(s) as processed..."):
+                                            for contract_id in unique_contracts:
+                                                if contract_id and str(contract_id) != 'nan' and str(contract_id) != '':
+                                                    result = mark_contract_processed(str(contract_id))
+                                                    if result.get('success'):
+                                                        mark_success += 1
+                                                    else:
+                                                        mark_fail += 1
+                                        
+                                        if mark_fail == 0:
+                                            st.success(f"✅ Marked {mark_success} contract(s) as processed")
+                                        else:
+                                            st.warning(f"⚠️ Marked {mark_success} contract(s). {mark_fail} failed.")
+                                except Exception as mark_error:
+                                    st.warning(f"⚠️ Usage events pushed but failed to mark contracts: {str(mark_error)}")
+                                    
                             elif success_count > 0:
                                 st.warning(f"⚠️ Pushed {success_count}/{total} events. {failure_count} failed.")
                                 if result.get('failures'):
@@ -443,6 +481,105 @@ def main():
                             st.warning("No usage events to push")
                     except Exception as e:
                         st.error(f"Error pushing usage events: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                
+                # Apply Prepaid Button
+                st.markdown("### Apply Prepaid")
+                if st.button("Apply Prepaid", type="primary"):
+                    try:
+                        from api import mark_contract_processed, get_invoices, create_usage_event
+                        
+                        # Get tabs_bt_contract from results
+                        tabs_bt_contract = results.get('tabs_bt_contract')
+                        
+                        if tabs_bt_contract is None or tabs_bt_contract.empty:
+                            st.error("No billing terms data found")
+                        else:
+                            # Find Prepaid rows in tabs_bt_contract
+                            prepaid_mask = tabs_bt_contract['name'].str.contains('Prepaid', case=False, na=False)
+                            prepaid_billing_terms = tabs_bt_contract[prepaid_mask]
+                            
+                            if prepaid_billing_terms.empty:
+                                st.warning("No Prepaid billing terms found")
+                            else:
+                                success_count = 0
+                                failure_count = 0
+                                errors = []
+                                
+                                # Get hardcoded Prepaid event type ID
+                                prepaid_event_type_id = '48ef8004-9735-4830-99fc-801161eb8d7f'
+                                
+                                with st.spinner(f"Processing {len(prepaid_billing_terms)} Prepaid customer(s)..."):
+                                    for _, prepaid_row in prepaid_billing_terms.iterrows():
+                                        customer_id = str(prepaid_row.get('customer_id', ''))
+                                        contract_id = str(prepaid_row.get('contract_id', ''))
+                                        
+                                        if not customer_id or not contract_id or customer_id == 'nan' or contract_id == 'nan':
+                                            errors.append(f"Missing customer_id or contract_id for row")
+                                            failure_count += 1
+                                            continue
+                                        
+                                        try:
+                                            # Step 1: Get invoice total
+                                            invoice_result = get_invoices(customer_id, contract_id)
+                                            if not invoice_result.get('success'):
+                                                errors.append(f"Customer {customer_id}: Failed to get invoices - {invoice_result.get('message')}")
+                                                failure_count += 1
+                                                continue
+                                            
+                                            invoice_total = invoice_result.get('total_amount', 0)
+                                            
+                                            # Step 2: Push Prepaid usage event with invoice total
+                                            billing_run_date = results.get('billing_run_date', datetime.now().strftime('%Y-%m-%d'))
+                                            
+                                            event_data = {
+                                                'customer_id': customer_id,
+                                                'event_type_id': prepaid_event_type_id,
+                                                'datetime': billing_run_date,
+                                                'value': invoice_total,
+                                                'differentiator': '',
+                                                'invoice_split_key': ''
+                                            }
+                                            
+                                            event_result = create_usage_event(event_data)
+                                            
+                                            if not event_result.get('success'):
+                                                errors.append(f"Customer {customer_id}: Failed to push Prepaid event - {event_result.get('message')}")
+                                                failure_count += 1
+                                                continue
+                                            
+                                            # Step 3: Mark contract as processed (last step)
+                                            mark_result = mark_contract_processed(contract_id)
+                                            if not mark_result.get('success'):
+                                                errors.append(f"Customer {customer_id}: Prepaid event pushed but failed to mark contract as processed - {mark_result.get('message')}")
+                                                # Still count as success since the prepaid event was pushed
+                                                success_count += 1
+                                            else:
+                                                success_count += 1
+                                                
+                                        except Exception as row_error:
+                                            errors.append(f"Customer {customer_id}: {str(row_error)}")
+                                            failure_count += 1
+                                
+                                # Show results
+                                if failure_count == 0:
+                                    st.success(f"✅ Successfully applied Prepaid for {success_count} customer(s)")
+                                elif success_count > 0:
+                                    st.warning(f"⚠️ Applied Prepaid for {success_count} customer(s). {failure_count} failed.")
+                                    with st.expander("View Errors"):
+                                        for error in errors:
+                                            st.error(error)
+                                else:
+                                    st.error(f"❌ Failed to apply Prepaid. {failure_count} failed.")
+                                    with st.expander("View Errors"):
+                                        for error in errors:
+                                            st.error(error)
+                                            
+                    except ImportError as e:
+                        st.error(f"Missing required API functions: {str(e)}")
+                    except Exception as e:
+                        st.error(f"Error applying Prepaid: {str(e)}")
                         import traceback
                         st.code(traceback.format_exc())
                 
