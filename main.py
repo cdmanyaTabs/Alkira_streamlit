@@ -250,7 +250,7 @@ def main():
             
             try:
                 # Step 1: Process Price Book ZIP
-                with st.spinner("Step 1/7: Processing Price Book ZIP file..."):
+                with st.spinner("Step 1/5: Processing Price Book ZIP file..."):
                     customer_files = price_book_transformation(price_book_file, billing_run_date)
                     
                     if 'errors' in customer_files and customer_files['errors']:
@@ -266,7 +266,7 @@ def main():
                         # Step 2: Filter with Raw Monthly Usage (if uploaded)
                         tabs_bt_clean_df = filtered_df
                         if raw_monthly_usage_file:
-                            with st.spinner("Step 2/7: Filtering with Raw Monthly Usage file..."):
+                            with st.spinner("Step 2/5: Filtering with Raw Monthly Usage file..."):
                                 # Reset file pointer in case it was read before
                                 raw_monthly_usage_file.seek(0)
                                 tabs_bt_clean_df = tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file)
@@ -277,7 +277,7 @@ def main():
                         # Step 3: Add Enterprise Support (if uploaded)
                         tabs_bt_enterprise = tabs_bt_clean_df
                         if enterprise_support_file:
-                            with st.spinner("Step 3/7: Adding Enterprise Support rows..."):
+                            with st.spinner("Step 3/5: Adding Enterprise Support rows..."):
                                 tabs_bt_enterprise = enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_date)
                                 st.success(f"✓ Step 3: Added Enterprise Support rows ({len(tabs_bt_enterprise)} rows)")
                         else:
@@ -286,48 +286,37 @@ def main():
                         # Step 4: Add Prepaid (if uploaded)
                         tabs_bt_prepaid_enterprise = tabs_bt_enterprise
                         if prepaid_file:
-                            with st.spinner("Step 4/7: Adding Prepaid rows..."):
+                            with st.spinner("Step 4/5: Adding Prepaid rows..."):
                                 tabs_bt_prepaid_enterprise = prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date)
                                 st.success(f"✓ Step 4: Added Prepaid rows ({len(tabs_bt_prepaid_enterprise)} rows)")
                         else:
                             st.info("Step 4: Skipped (Prepaid file not uploaded)")
                         
-                        # Step 5: Create Contracts
-                        with st.spinner("Step 5/7: Creating contracts..."):
-                            tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise)
-                            contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
-                            st.success(f"✓ Step 5: Created contracts ({contracts_created} contracts)")
-                            results['tabs_bt_contract'] = tabs_bt_contract
-                            results['billing_run_date'] = billing_run_date
+                        # Store the processed billing terms data (before contract/invoice creation)
+                        results['tabs_bt_prepaid_enterprise'] = tabs_bt_prepaid_enterprise
+                        results['billing_run_date'] = billing_run_date
                         
-                        # Step 6: Create Invoices
-                        with st.spinner("Step 6/7: Creating invoices and pushing to API..."):
-                            invoices_result = create_invoices(tabs_bt_contract)
-                            success_count = (invoices_result['push_status'] == 'SUCCESS').sum() if 'push_status' in invoices_result.columns else 0
-                            st.success(f"✓ Step 6: Created invoices ({success_count} successful)")
-                            results['invoices_result'] = invoices_result
-                        
-                        # Step 7: Create Tabs Ready Usage (if raw_monthly_usage_file uploaded)
+                        # Step 5: Create Tabs Ready Usage (if raw_monthly_usage_file uploaded)
                         usage_output = None
                         if raw_monthly_usage_file:
-                            with st.spinner("Step 7/7: Creating Tabs Ready Usage file..."):
+                            with st.spinner("Step 5/5: Creating Tabs Ready Usage file..."):
                                 # Reset file pointer in case it was read before
                                 raw_monthly_usage_file.seek(0)
                                 if enterprise_support_file:
                                     enterprise_support_file.seek(0)
                                 usage_output = create_tabs_ready_usage(
                                     raw_monthly_usage_file, 
-                                    tabs_bt_contract, 
+                                    tabs_bt_prepaid_enterprise,  # Use prepaid data, not contracts
                                     enterprise_support_file, 
                                     billing_run_date
                                 )
                                 if not usage_output.empty:
-                                    st.success(f"✓ Step 7: Created Tabs Ready Usage ({len(usage_output)} rows)")
+                                    st.success(f"✓ Step 5: Created Tabs Ready Usage ({len(usage_output)} rows)")
                                     results['usage_output'] = usage_output
                                 else:
-                                    st.warning("Step 7: Usage output is empty")
+                                    st.warning("Step 5: Usage output is empty")
                         else:
-                            st.info("Step 7: Skipped (Raw Monthly Usage file not uploaded)")
+                            st.info("Step 5: Skipped (Raw Monthly Usage file not uploaded)")
                         
                         # Store results in session state
                         st.session_state['processing_results'] = results
@@ -347,6 +336,45 @@ def main():
                 import traceback
                 st.code(traceback.format_exc())
     
+    # Create Contracts + Invoices in Tabs button (only shown after Process Files completes)
+    if st.session_state.get('processing_results'):
+        results = st.session_state['processing_results']
+        
+        # Check if we have processed data ready for contract creation
+        if 'tabs_bt_prepaid_enterprise' in results:
+            st.markdown("---")
+            st.subheader("📤 Push to Tabs API")
+            st.write("Create contracts and invoice obligations in Tabs. This step pushes data to the Tabs API.")
+            
+            if st.button("Create Contracts + Invoices in Tabs", type="primary", key="create_contracts_invoices"):
+                try:
+                    tabs_bt_prepaid_enterprise = results['tabs_bt_prepaid_enterprise']
+                    billing_run_date = results.get('billing_run_date')
+                    
+                    # Step 1: Create Contracts
+                    with st.spinner("Creating contracts in Tabs..."):
+                        tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise)
+                        contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
+                        st.success(f"✓ Created {contracts_created} contracts in Tabs")
+                        results['tabs_bt_contract'] = tabs_bt_contract
+                    
+                    # Step 2: Create Invoices
+                    with st.spinner("Creating invoices and pushing to Tabs API..."):
+                        invoices_result = create_invoices(tabs_bt_contract)
+                        success_count = (invoices_result['push_status'] == 'SUCCESS').sum() if 'push_status' in invoices_result.columns else 0
+                        st.success(f"✓ Created {success_count} invoices in Tabs")
+                        results['invoices_result'] = invoices_result
+                    
+                    # Update session state
+                    st.session_state['processing_results'] = results
+                    st.success("✅ Contracts and Invoices created in Tabs successfully!")
+                    st.rerun()
+                    
+                except Exception as e:
+                    st.error(f"Error creating contracts/invoices: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
+    
     # Display CSV outputs if processing was completed
     if st.session_state.get('processing_results'):
         st.markdown("---")
@@ -354,26 +382,33 @@ def main():
         results = st.session_state['processing_results']
         
         # Billing Terms CSV
-        if 'invoices_result' in results:
-            invoices_df = results['invoices_result']
-            if not invoices_df.empty:
-                st.markdown("### Billing Terms CSV")
-                st.info(f"Rows: {len(invoices_df)} | Columns: {len(invoices_df.columns)}")
-                
-                # Convert to CSV
-                csv_billing = invoices_df.to_csv(index=False)
-                
-                # Display preview
-                with st.expander("Preview Billing Terms Data"):
-                    st.dataframe(invoices_df.head(20))
-                
-                # Download button
-                st.download_button(
-                    label="Download Billing Terms CSV",
-                    data=csv_billing,
-                    file_name="billing_terms.csv",
-                    mime="text/csv"
-                )
+        # Use invoices_result if contracts have been created, otherwise use tabs_bt_prepaid_enterprise
+        billing_terms_df = None
+        if 'invoices_result' in results and not results['invoices_result'].empty:
+            billing_terms_df = results['invoices_result']
+            csv_title = "Billing Terms CSV (with Contract IDs & Push Status)"
+        elif 'tabs_bt_prepaid_enterprise' in results and not results['tabs_bt_prepaid_enterprise'].empty:
+            billing_terms_df = results['tabs_bt_prepaid_enterprise']
+            csv_title = "Billing Terms CSV (Processed Data)"
+        
+        if billing_terms_df is not None:
+            st.markdown(f"### {csv_title}")
+            st.info(f"Rows: {len(billing_terms_df)} | Columns: {len(billing_terms_df.columns)}")
+            
+            # Convert to CSV
+            csv_billing = billing_terms_df.to_csv(index=False)
+            
+            # Display preview
+            with st.expander("Preview Billing Terms Data"):
+                st.dataframe(billing_terms_df.head(20))
+            
+            # Download button
+            st.download_button(
+                label="Download Billing Terms CSV",
+                data=csv_billing,
+                file_name="billing_terms.csv",
+                mime="text/csv"
+            )
         
         # Usage CSV
         if 'usage_output' in results:
@@ -382,8 +417,9 @@ def main():
                 st.markdown("### Usage CSV")
                 st.info(f"Rows: {len(usage_df)} | Columns: {len(usage_df.columns)}")
                 
-                # Convert to CSV
-                csv_usage = usage_df.to_csv(index=False)
+                # Convert to CSV (exclude event_type_id, keep only event_type_name)
+                columns_to_export = ['customer_id', 'event_type_name', 'datetime', 'value', 'differentiator', 'invoice']
+                csv_usage = usage_df[columns_to_export].to_csv(index=False)
                 
                 # Display preview
                 with st.expander("Preview Usage Data"):
@@ -409,10 +445,9 @@ def main():
                         # Convert filtered usage to list of event dictionaries
                         events_list = []
                         for _, row in filtered_usage.iterrows():
-                            # invoice_split_key should be blank for the first one (invoice=1)
-                            # and only populated for 2nd+ (invoice=2, 3, etc.)
-                            invoice_val = row.get('invoice', '')
-                            invoice_split_key = '' if str(invoice_val) == '1' else str(invoice_val)
+                            # invoice column already contains the correct format (blank, 1, 2, 3...)
+                            # Just use it directly as invoice_split_key
+                            invoice_split_key = str(row.get('invoice', ''))
                             
                             event = {
                                 'customer_id': str(row.get('customer_id', '')),
@@ -507,16 +542,20 @@ def main():
                                 failure_count = 0
                                 errors = []
                                 
-                                # Get hardcoded Prepaid event type ID
-                                prepaid_event_type_id = '48ef8004-9735-4830-99fc-801161eb8d7f'
-                                
                                 with st.spinner(f"Processing {len(prepaid_billing_terms)} Prepaid customer(s)..."):
                                     for _, prepaid_row in prepaid_billing_terms.iterrows():
                                         customer_id = str(prepaid_row.get('customer_id', ''))
                                         contract_id = str(prepaid_row.get('contract_id', ''))
+                                        # Get the event_to_track (Prepaid event type ID) from the billing term row
+                                        prepaid_event_type_id = str(prepaid_row.get('event_to_track', ''))
                                         
                                         if not customer_id or not contract_id or customer_id == 'nan' or contract_id == 'nan':
                                             errors.append(f"Missing customer_id or contract_id for row")
+                                            failure_count += 1
+                                            continue
+                                        
+                                        if not prepaid_event_type_id or prepaid_event_type_id == 'nan':
+                                            errors.append(f"Customer {customer_id}: Missing event_to_track (Prepaid event type ID)")
                                             failure_count += 1
                                             continue
                                         
@@ -530,6 +569,14 @@ def main():
                                             
                                             invoice_total = invoice_result.get('total_amount', 0)
                                             
+                                            # #region agent log
+                                            import json
+                                            log_path = '/Users/chiragdas/Documents/GitHub/Alkira_streamlit/debug.log'
+                                            with open(log_path, 'a') as f:
+                                                f.write(json.dumps({"id":"log_INVOICE","timestamp":__import__('time').time()*1000,"location":"main.py:566","message":"Invoice result for Prepaid","data":{"customer_id":customer_id,"contract_id":contract_id,"invoice_total":invoice_total,"invoice_total_type":str(type(invoice_total).__name__),"invoice_result_keys":list(invoice_result.keys())},"runId":"prepaid","hypothesisId":"A"}) + '\n')
+                                                f.flush()
+                                            # #endregion
+                                            
                                             # Step 2: Push Prepaid usage event with invoice total
                                             billing_run_date = results.get('billing_run_date', datetime.now().strftime('%Y-%m-%d'))
                                             
@@ -541,6 +588,12 @@ def main():
                                                 'differentiator': '',
                                                 'invoice_split_key': ''
                                             }
+                                            
+                                            # #region agent log
+                                            with open(log_path, 'a') as f:
+                                                f.write(json.dumps({"id":"log_EVENT_DATA","timestamp":__import__('time').time()*1000,"location":"main.py:578","message":"Event data before API call","data":{"event_data":event_data,"billing_run_date":billing_run_date,"billing_run_date_type":str(type(billing_run_date).__name__)},"runId":"prepaid","hypothesisId":"B,C,D,E"}) + '\n')
+                                                f.flush()
+                                            # #endregion
                                             
                                             event_result = create_usage_event(event_data)
                                             
@@ -594,22 +647,25 @@ def main():
                         try:
                             from google_sheets import update_prepaid_sheet
                             
-                            # Get tabs_bt_contract from results
-                            tabs_bt_contract = results.get('tabs_bt_contract')
+                            # Get billing terms data - prefer tabs_bt_contract if available
+                            billing_terms_data = results.get('tabs_bt_contract') or results.get('tabs_bt_prepaid_enterprise')
                             
-                            # Generate prepaid data
-                            prepaid_data = generate_prepaid_report_data(usage_df, tabs_bt_contract)
-                            
-                            if prepaid_data:
-                                with st.spinner("Updating Prepaid Sheet..."):
-                                    result = update_prepaid_sheet(prepaid_data)
-                                
-                                if result.get('success'):
-                                    st.success(result.get('message'))
-                                else:
-                                    st.error(result.get('message'))
+                            if billing_terms_data is None:
+                                st.error("No billing terms data available")
                             else:
-                                st.warning("No prepaid data found to update")
+                                # Generate prepaid data
+                                prepaid_data = generate_prepaid_report_data(usage_df, billing_terms_data)
+                                
+                                if prepaid_data:
+                                    with st.spinner("Updating Prepaid Sheet..."):
+                                        result = update_prepaid_sheet(prepaid_data)
+                                    
+                                    if result.get('success'):
+                                        st.success(result.get('message'))
+                                    else:
+                                        st.error(result.get('message'))
+                                else:
+                                    st.warning("No prepaid data found to update")
                         except ImportError:
                             st.error("Google Sheets integration not configured. Please set up service account credentials.")
                         except Exception as e:
@@ -620,23 +676,26 @@ def main():
                         try:
                             from google_sheets import update_commit_consumption_sheet
                             
-                            # Get tabs_bt_contract and billing_run_date from results
-                            tabs_bt_contract = results.get('tabs_bt_contract')
+                            # Get billing terms data - prefer tabs_bt_contract if available
+                            billing_terms_data = results.get('tabs_bt_contract') or results.get('tabs_bt_prepaid_enterprise')
                             billing_run_date = results.get('billing_run_date', datetime.now().strftime('%Y-%m-%d'))
                             
-                            # Generate consumption data
-                            consumption_data = generate_commit_consumption_data(usage_df, tabs_bt_contract)
-                            
-                            if consumption_data:
-                                with st.spinner("Updating Commit Consumption Sheet..."):
-                                    result = update_commit_consumption_sheet(consumption_data, billing_run_date)
-                                
-                                if result.get('success'):
-                                    st.success(result.get('message'))
-                                else:
-                                    st.error(result.get('message'))
+                            if billing_terms_data is None:
+                                st.error("No billing terms data available")
                             else:
-                                st.warning("No consumption data found to update")
+                                # Generate consumption data
+                                consumption_data = generate_commit_consumption_data(usage_df, billing_terms_data)
+                                
+                                if consumption_data:
+                                    with st.spinner("Updating Commit Consumption Sheet..."):
+                                        result = update_commit_consumption_sheet(consumption_data, billing_run_date)
+                                    
+                                    if result.get('success'):
+                                        st.success(result.get('message'))
+                                    else:
+                                        st.error(result.get('message'))
+                                else:
+                                    st.warning("No consumption data found to update")
                         except ImportError:
                             st.error("Google Sheets integration not configured. Please set up service account credentials.")
                         except Exception as e:

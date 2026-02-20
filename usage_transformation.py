@@ -8,6 +8,34 @@ from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from api import get_all_customers, get_event_ids, get_integration_items, create_contract, push_bt
 
+def normalize_contract_name(contract_name):
+    """
+    Normalize contract name for consistent matching.
+    Handles variations in spacing, capitalization, and delimiters.
+    
+    Examples:
+        "SFDC#00000318+SFDC#00000342" -> "SFDC#00000318+SFDC#00000342"
+        "SFDC#00000318 + SFDC#00000342" -> "SFDC#00000318+SFDC#00000342"
+        "sfdc#00000318 + SFDC#00000342" -> "SFDC#00000318+SFDC#00000342"
+        "  SFDC#00000318  " -> "SFDC#00000318"
+    
+    Args:
+        contract_name: Raw contract name string
+        
+    Returns:
+        str: Normalized contract name (uppercase, no spaces)
+    """
+    if not contract_name or pd.isna(contract_name):
+        return ''
+    
+    # Convert to string and uppercase
+    normalized = str(contract_name).upper()
+    
+    # Remove all whitespace (spaces, tabs, newlines)
+    normalized = ''.join(normalized.split())
+    
+    return normalized
+
 def price_book_transformation(zip_file, billing_run_date=None):
     """
     Extract ZIP file and parse tenant IDs from filenames.
@@ -68,7 +96,8 @@ def price_book_transformation(zip_file, billing_run_date=None):
             
             # Extract contract_name: Pattern like SFDC#00000323 or SFDC#00000131+SFDC#00000185 (before file extension)
             # Supports single or multiple SFDC# patterns joined by +
-            contract_match = re.search(r'(SFDC#\d+(?:\+SFDC#\d+)*)\.\w+$', basename, re.IGNORECASE)
+            # Also handles filenames like "SFDC#00000245 (1).xlsx" or "SFDC#00000245.xlsx"
+            contract_match = re.search(r'(SFDC#\d+(?:\+SFDC#\d+)*)(?:\s*\(\d+\))?\.\w+$', basename, re.IGNORECASE)
             
             if tenant_match:
                 tenant_id = tenant_match.group(1)
@@ -460,8 +489,21 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
             return filtered_df
         
         # Check if required columns exist in raw usage file (including Contract/SFDC#)
-        # Accept either 'Contract' or 'SFDC#' as the contract column name
-        contract_col = 'Contract' if 'Contract' in raw_usage_df.columns else ('SFDC#' if 'SFDC#' in raw_usage_df.columns else None)
+        # Prefer 'Contract' if it has values, otherwise use 'SFDC#'
+        contract_col = None
+        if 'Contract' in raw_usage_df.columns:
+            # Check if Contract column has any non-null values
+            if raw_usage_df['Contract'].notna().any():
+                contract_col = 'Contract'
+        
+        # If Contract is null/empty, try SFDC#
+        if contract_col is None and 'SFDC#' in raw_usage_df.columns:
+            if raw_usage_df['SFDC#'].notna().any():
+                contract_col = 'SFDC#'
+        
+        # Fallback to Contract even if empty (for backwards compatibility)
+        if contract_col is None:
+            contract_col = 'Contract' if 'Contract' in raw_usage_df.columns else ('SFDC#' if 'SFDC#' in raw_usage_df.columns else None)
         
         required_columns = ['Tenant ID', 'SKU Name']
         missing_columns = [col for col in required_columns if col not in raw_usage_df.columns]
@@ -479,12 +521,15 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         raw_usage_df['SKU Name'] = raw_usage_df['SKU Name'].astype(str)
         raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
         
-        # Create a set of tuples for matching (Tenant ID, SKU Name lowercase, Contract)
+        # Normalize contract names for matching (remove spaces, uppercase)
+        raw_usage_df['Contract_normalized'] = raw_usage_df['Contract'].apply(normalize_contract_name)
+        
+        # Create a set of tuples for matching (Tenant ID, SKU Name lowercase, Contract normalized)
         # SKU Name is lowercased for case-insensitive matching
         matching_tuples = set(zip(
             raw_usage_df['Tenant ID'], 
             raw_usage_df['SKU Name'].str.lower(),
-            raw_usage_df['Contract']
+            raw_usage_df['Contract_normalized']
         ))
         
         # Make a copy of filtered_df to avoid modifying the original
@@ -495,10 +540,13 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         filtered_df_copy['name'] = filtered_df_copy['name'].astype(str)
         filtered_df_copy['contract_name'] = filtered_df_copy['contract_name'].astype(str) if 'contract_name' in filtered_df_copy.columns else ''
         
-        # Filter filtered_df to only include rows where (tenant_id, name, contract_name) matches
-        # any combination in the raw usage file (case-insensitive for SKU name)
+        # Normalize contract_name from price book for matching
+        filtered_df_copy['contract_name_normalized'] = filtered_df_copy['contract_name'].apply(normalize_contract_name)
+        
+        # Filter filtered_df to only include rows where (tenant_id, name, contract_name_normalized) matches
+        # any combination in the raw usage file (case-insensitive for SKU name, normalized for contract)
         mask = filtered_df_copy.apply(
-            lambda row: (str(row['tenant_id']), str(row['name']).lower(), str(row.get('contract_name', ''))) in matching_tuples,
+            lambda row: (str(row['tenant_id']), str(row['name']).lower(), str(row.get('contract_name_normalized', ''))) in matching_tuples,
             axis=1
         )
         
@@ -770,6 +818,21 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None):
                 if not pd.isna(value):
                     net_terms_value = str(value)
             
+            # Get the Prepaid event type ID from the API
+            prepaid_event_type_id = ''
+            try:
+                event_types_df = get_event_ids()
+                if not event_types_df.empty:
+                    # Filter for event type name "Prepaid" (case-insensitive)
+                    prepaid_events = event_types_df[event_types_df['name'].str.lower() == 'prepaid']
+                    if not prepaid_events.empty:
+                        prepaid_event_type_id = prepaid_events.iloc[0]['id']
+                        print(f"Found Prepaid event type ID: {prepaid_event_type_id}")
+                    else:
+                        print(f"Warning: No 'Prepaid' event type found in system")
+            except Exception as e:
+                print(f"Error fetching event types: {str(e)}")
+            
             # Create a new row with hard-coded values
             new_row = {
                 'customer_id': tabs_customer_id,  # Tabs Customer ID (from matching row)
@@ -785,7 +848,7 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None):
                 'is_volume': 'FALSE',
                 'billing_type': 'UNIT_PRICE',
                 'invoiceDateStrategy': 'ARREARS',
-                'event_to_track': '48ef8004-9735-4830-99fc-801161eb8d7f',
+                'event_to_track': prepaid_event_type_id,  # Use the fetched ID instead of hardcoded
                 'name': 'Prepaid',  
                 'note': '',
                 'integration_item_id': '',
@@ -1090,8 +1153,21 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             return pd.DataFrame()
         
         # Check if required columns exist in raw usage file (including Contract/SFDC# and Tenant Name)
-        # Accept either 'Contract' or 'SFDC#' as the contract column name
-        contract_col = 'Contract' if 'Contract' in raw_usage_df.columns else ('SFDC#' if 'SFDC#' in raw_usage_df.columns else None)
+        # Prefer 'Contract' if it has values, otherwise use 'SFDC#'
+        contract_col = None
+        if 'Contract' in raw_usage_df.columns:
+            # Check if Contract column has any non-null values
+            if raw_usage_df['Contract'].notna().any():
+                contract_col = 'Contract'
+        
+        # If Contract is null/empty, try SFDC#
+        if contract_col is None and 'SFDC#' in raw_usage_df.columns:
+            if raw_usage_df['SFDC#'].notna().any():
+                contract_col = 'SFDC#'
+        
+        # Fallback to Contract even if empty (for backwards compatibility)
+        if contract_col is None:
+            contract_col = 'Contract' if 'Contract' in raw_usage_df.columns else ('SFDC#' if 'SFDC#' in raw_usage_df.columns else None)
         
         required_columns = ['Tenant ID', 'Tenant Name', 'SKU Name', 'Meter']
         missing_columns = [col for col in required_columns if col not in raw_usage_df.columns]
@@ -1107,6 +1183,8 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(str)
         raw_usage_df['Tenant Name'] = raw_usage_df['Tenant Name'].astype(str)
         raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
+        # Normalize contract for matching (remove spaces, uppercase)
+        raw_usage_df['Contract'] = raw_usage_df['Contract'].apply(normalize_contract_name)
         
         # Get all customers from API to map tenant_id to Tabs Customer ID
         try:
@@ -1158,10 +1236,11 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             
             # Create a lookup dictionary: (customer_id, SKU Name, Contract, Tenant Name) -> Meter value (sum if multiple rows)
             # This groups by Tenant Name so different Tenant Names keep separate rows
+            # NOTE: SKU Name is lowercased for case-insensitive matching with price book
             usage_lookup = {}
             for _, row in raw_usage_df.iterrows():
                 customer_id = str(row['customer_id'])
-                sku_name = str(row['SKU Name'])
+                sku_name = str(row['SKU Name']).lower()  # Lowercase for case-insensitive matching
                 contract = str(row['Contract'])
                 tenant_name = str(row['Tenant Name'])
                 meter_value = row['Meter']
@@ -1191,10 +1270,15 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                     tenant_id_to_tenant_names[tenant_id].append(tenant_name)
             
             # Create the invoice mapping
+            # First tenant name gets blank (''), subsequent get 1, 2, 3, etc.
+            # This matches the invoice_split_key format used when pushing to Tabs API
             invoice_mapping = {}
             for tenant_id, tenant_names in tenant_id_to_tenant_names.items():
                 for idx, tenant_name in enumerate(tenant_names, start=1):
-                    invoice_mapping[(tenant_id, tenant_name)] = idx
+                    if idx == 1:
+                        invoice_mapping[(tenant_id, tenant_name)] = ''
+                    else:
+                        invoice_mapping[(tenant_id, tenant_name)] = idx - 1
             
             print(f"Created invoice mapping for {len(invoice_mapping)} (Tenant ID, Tenant Name) combinations")
             
@@ -1218,22 +1302,29 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         
         # Get set of valid (customer_id, sku_name, contract_name) from tabs_bt_contract for filtering
         # Also create mapping for event_type_id lookup
+        # NOTE: SKU names are lowercased for case-insensitive matching with raw usage
         valid_billing_terms = set()
-        event_type_id_map = {}  # (customer_id, sku_name, contract_name) -> event_to_track
+        event_type_id_map = {}  # (customer_id, sku_name_lower, contract_name) -> event_to_track
+        sku_name_original_map = {}  # (customer_id, sku_name_lower, contract_name) -> original_sku_name
         enterprise_support_rows = []
         prepaid_rows = []
         
         for _, bt_row in tabs_bt_contract.iterrows():
             customer_id = str(bt_row.get('customer_id', ''))
             sku_name = str(bt_row.get('name', ''))
+            sku_name_lower = sku_name.lower()  # Lowercase for case-insensitive matching
             contract_name = str(bt_row.get('contract_name', '')) if 'contract_name' in bt_row.index else ''
+            contract_name = normalize_contract_name(contract_name)  # Normalize for matching
             event_to_track = str(bt_row.get('event_to_track', '')) if pd.notna(bt_row.get('event_to_track')) else ''
             
             if not customer_id or not sku_name or customer_id == 'nan' or sku_name == 'nan':
                 continue
             
-            # Store event_type_id mapping for all billing terms
-            event_type_id_map[(customer_id, sku_name, contract_name)] = event_to_track
+            # Store event_type_id mapping for all billing terms (using lowercase SKU and normalized contract)
+            event_type_id_map[(customer_id, sku_name_lower, contract_name)] = event_to_track
+            
+            # Store original SKU name for display purposes
+            sku_name_original_map[(customer_id, sku_name_lower, contract_name)] = sku_name
             
             # Check if this is Enterprise Support or Prepaid row
             is_enterprise_support = 'Enterprise Support' in sku_name or sku_name == 'Enterprise Support'
@@ -1258,17 +1349,18 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                     'bt_row': bt_row
                 })
             else:
-                # Add to valid billing terms set
-                valid_billing_terms.add((customer_id, sku_name, contract_name))
+                # Add to valid billing terms set (using lowercase SKU name)
+                valid_billing_terms.add((customer_id, sku_name_lower, contract_name))
         
         # Create output_df by iterating through usage_lookup
         # This creates one row per unique (customer_id, SKU, Contract, Tenant Name) combination
         output_rows = []
         for lookup_key, meter_value in usage_lookup.items():
-            customer_id, sku_name, contract, tenant_name = lookup_key
+            customer_id, sku_name_lower, contract, tenant_name = lookup_key
             
             # Only include rows that match a billing term in tabs_bt_contract
-            if (customer_id, sku_name, contract) not in valid_billing_terms:
+            # Note: sku_name_lower is already lowercase from usage_lookup
+            if (customer_id, sku_name_lower, contract) not in valid_billing_terms:
                 continue
             
             # Get tenant_id from customer_id for invoice lookup
@@ -1277,13 +1369,16 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             # Get invoice number from mapping
             invoice_num = invoice_mapping.get((tenant_id, tenant_name), 1)
             
-            # Get event_type_id from mapping
-            event_type_id = event_type_id_map.get((customer_id, sku_name, contract), '')
+            # Get event_type_id from mapping (using lowercase key)
+            event_type_id = event_type_id_map.get((customer_id, sku_name_lower, contract), '')
+            
+            # Get original SKU name from price book for display
+            original_sku_name = sku_name_original_map.get((customer_id, sku_name_lower, contract), sku_name_lower)
             
             output_rows.append({
                 'customer_id': customer_id,
                 'event_type_id': event_type_id,
-                'event_type_name': sku_name,
+                'event_type_name': original_sku_name,  # Use original case from price book
                 'datetime': billing_date,
                 'value': meter_value,
                 'differentiator': '',
@@ -1305,8 +1400,8 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         
         # Rebuild contract mapping from usage_lookup keys
         for lookup_key, _ in usage_lookup.items():
-            customer_id, sku_name, contract, tenant_name = lookup_key
-            if (customer_id, sku_name, contract) in valid_billing_terms:
+            customer_id, sku_name_lower, contract, tenant_name = lookup_key
+            if (customer_id, sku_name_lower, contract) in valid_billing_terms:
                 tenant_id = customer_id_to_tenant_id.get(customer_id, '')
                 invoice_num = invoice_mapping.get((tenant_id, tenant_name), 1)
                 # Store (customer_id, contract) -> invoice_num

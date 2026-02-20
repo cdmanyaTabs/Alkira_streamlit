@@ -509,12 +509,26 @@ def create_usage_event(event_data: dict, idempotency_key: str = None) -> dict:
             "invoiceSplitKey": event_data.get('invoice_split_key', '')
         }
         
+        # #region agent log
+        import json
+        log_path = '/Users/chiragdas/Documents/GitHub/Alkira_streamlit/debug.log'
+        with open(log_path, 'a') as f:
+            f.write(json.dumps({"id":"log_PAYLOAD","timestamp":__import__('time').time()*1000,"location":"api.py:510","message":"API payload being sent","data":{"payload":payload,"value_type":str(type(payload.get('value')).__name__),"datetime_original":event_data.get('datetime'),"datetime_converted":datetime_value},"runId":"prepaid","hypothesisId":"A,B,E"}) + '\n')
+            f.flush()
+        # #endregion
+        
         # Debug: Print request details
         print(f"\n=== DEBUG: Usage Event API Request ===")
         print(f"URL: {USAGE_EVENTS_API_URL}")
         print(f"Payload: {payload}")
         
         response = requests.post(USAGE_EVENTS_API_URL, headers=headers, json=payload)
+        
+        # #region agent log
+        with open(log_path, 'a') as f:
+            f.write(json.dumps({"id":"log_RESPONSE","timestamp":__import__('time').time()*1000,"location":"api.py:523","message":"API response received","data":{"status_code":response.status_code,"response_text":response.text[:500] if response.text else ""},"runId":"prepaid","hypothesisId":"ALL"}) + '\n')
+            f.flush()
+        # #endregion
         
         # Debug: Print response details
         print(f"Response Status: {response.status_code}")
