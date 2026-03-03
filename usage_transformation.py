@@ -1232,7 +1232,8 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
         
         # Convert columns to string for matching
-        raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(str)
+        # Convert tenant IDs to int first to remove .0, then to string for consistent matching
+        raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(float).astype(int).astype(str)
         raw_usage_df['Tenant Name'] = raw_usage_df['Tenant Name'].astype(str)
         raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
         # Normalize contract for matching (remove spaces, uppercase)
