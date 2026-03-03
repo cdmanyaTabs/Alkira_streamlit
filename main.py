@@ -269,7 +269,7 @@ def main():
                             with st.spinner("Step 2/5: Filtering with Raw Monthly Usage file..."):
                                 # Reset file pointer in case it was read before
                                 raw_monthly_usage_file.seek(0)
-                                tabs_bt_clean_df = tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file)
+                                tabs_bt_clean_df = tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file, st)
                                 st.success(f"✓ Step 2: Filtered with Raw Monthly Usage ({len(tabs_bt_clean_df)} rows)")
                         else:
                             st.info("Step 2: Skipped (Raw Monthly Usage file not uploaded)")

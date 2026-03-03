@@ -460,7 +460,7 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None):
     return filtered_df
 
 
-def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
+def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file, st=None):
     """
     Compare the filtered_df with the Raw Monthly Usage file.
     Filter filtered_df to only include rows where tenant_id, name, and contract_name match
@@ -505,6 +505,18 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         if contract_col is None:
             contract_col = 'Contract' if 'Contract' in raw_usage_df.columns else ('SFDC#' if 'SFDC#' in raw_usage_df.columns else None)
         
+        def debug(msg):
+            print(msg)
+            if st:
+                st.write(msg)
+        
+        debug("\n=== DEBUG: Contract Column Selection ===")
+        debug(f"Has 'Contract' column: {'Contract' in raw_usage_df.columns}")
+        debug(f"Has 'SFDC#' column: {'SFDC#' in raw_usage_df.columns}")
+        debug(f"'Contract' has values: {raw_usage_df['Contract'].notna().any() if 'Contract' in raw_usage_df.columns else False}")
+        debug(f"'SFDC#' has values: {raw_usage_df['SFDC#'].notna().any() if 'SFDC#' in raw_usage_df.columns else False}")
+        debug(f"Selected column: {contract_col}")
+        
         required_columns = ['Tenant ID', 'SKU Name']
         missing_columns = [col for col in required_columns if col not in raw_usage_df.columns]
         
@@ -517,12 +529,25 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         
         # Get unique combinations of Tenant ID, SKU Name, and Contract from raw usage file
         # Convert to string and handle any NaN values
-        raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(str)
+        # Convert tenant IDs to int first to remove .0, then to string for consistent matching
+        raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(float).astype(int).astype(str)
         raw_usage_df['SKU Name'] = raw_usage_df['SKU Name'].astype(str)
         raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
         
+        debug("\n=== DEBUG: Raw Usage Data ===")
+        debug(f"Total rows: {len(raw_usage_df)}")
+        debug(f"Sample Tenant IDs: {raw_usage_df['Tenant ID'].head(5).tolist()}")
+        debug(f"Sample SKU Names: {raw_usage_df['SKU Name'].head(5).tolist()}")
+        debug(f"Sample Contracts: {raw_usage_df['Contract'].head(5).tolist()}")
+        debug(f"Unique Tenant IDs: {raw_usage_df['Tenant ID'].unique().tolist()[:10]}")
+        debug(f"Unique Contracts: {raw_usage_df['Contract'].unique().tolist()[:10]}")
+        
         # Normalize contract names for matching (remove spaces, uppercase)
         raw_usage_df['Contract_normalized'] = raw_usage_df['Contract'].apply(normalize_contract_name)
+        
+        debug("\n=== DEBUG: After Normalization ===")
+        debug(f"Sample normalized contracts: {raw_usage_df['Contract_normalized'].head(5).tolist()}")
+        debug(f"Unique normalized contracts: {raw_usage_df['Contract_normalized'].unique().tolist()[:10]}")
         
         # Create a set of tuples for matching (Tenant ID, SKU Name lowercase, Contract normalized)
         # SKU Name is lowercased for case-insensitive matching
@@ -543,12 +568,39 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file):
         # Normalize contract_name from price book for matching
         filtered_df_copy['contract_name_normalized'] = filtered_df_copy['contract_name'].apply(normalize_contract_name)
         
+        debug("\n=== DEBUG: Price Book Data ===")
+        debug(f"Total rows: {len(filtered_df_copy)}")
+        debug(f"Sample Tenant IDs: {filtered_df_copy['tenant_id'].head(5).tolist()}")
+        debug(f"Sample SKU Names: {filtered_df_copy['name'].head(5).tolist()}")
+        debug(f"Sample Contracts: {filtered_df_copy['contract_name'].head(5).tolist()}")
+        debug(f"Sample Normalized: {filtered_df_copy['contract_name_normalized'].head(5).tolist()}")
+        debug(f"Unique Tenant IDs: {filtered_df_copy['tenant_id'].unique().tolist()[:10]}")
+        debug(f"Unique Contracts (normalized): {filtered_df_copy['contract_name_normalized'].unique().tolist()[:10]}")
+        
         # Filter filtered_df to only include rows where (tenant_id, name, contract_name_normalized) matches
         # any combination in the raw usage file (case-insensitive for SKU name, normalized for contract)
         mask = filtered_df_copy.apply(
             lambda row: (str(row['tenant_id']), str(row['name']).lower(), str(row.get('contract_name_normalized', ''))) in matching_tuples,
             axis=1
         )
+        
+        debug("\n=== DEBUG: Matching Results ===")
+        match_count = mask.sum()
+        debug(f"Total rows: {len(filtered_df_copy)}")
+        debug(f"Matched: {match_count}")
+        debug(f"Unmatched: {len(filtered_df_copy) - match_count}")
+        
+        if match_count > 0:
+            sample_match = filtered_df_copy[mask].head(2)
+            debug("\nSample MATCHED rows:")
+            for idx, row in sample_match.iterrows():
+                debug(f"  Tenant: {row['tenant_id']}, SKU: {row['name'].lower()}, Contract: {row['contract_name_normalized']}")
+        
+        if len(filtered_df_copy[~mask]) > 0:
+            sample_no_match = filtered_df_copy[~mask].head(2)
+            debug("\nSample UNMATCHED rows:")
+            for idx, row in sample_no_match.iterrows():
+                debug(f"  Tenant: {row['tenant_id']}, SKU: {row['name'].lower()}, Contract: {row['contract_name_normalized']}")
         
         # Create Tabs_bt_final_df with only matching rows
         Tabs_bt_clean_df = filtered_df_copy[mask].copy()
