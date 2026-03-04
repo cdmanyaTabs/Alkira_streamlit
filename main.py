@@ -710,9 +710,11 @@ def main():
                             from google_sheets import update_prepaid_sheet
                             
                             # Get billing terms data - prefer tabs_bt_contract if available
-                            billing_terms_data = results.get('tabs_bt_contract') or results.get('tabs_bt_prepaid_enterprise')
+                            billing_terms_data = results.get('tabs_bt_contract')
+                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
                             
-                            if billing_terms_data is None:
+                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
                                 st.error("No billing terms data available")
                             else:
                                 # Generate prepaid data
@@ -739,10 +741,12 @@ def main():
                             from google_sheets import update_commit_consumption_sheet
                             
                             # Get billing terms data - prefer tabs_bt_contract if available
-                            billing_terms_data = results.get('tabs_bt_contract') or results.get('tabs_bt_prepaid_enterprise')
+                            billing_terms_data = results.get('tabs_bt_contract')
+                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
                             billing_run_date = results.get('billing_run_date', datetime.now().strftime('%Y-%m-%d'))
                             
-                            if billing_terms_data is None:
+                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
                                 st.error("No billing terms data available")
                             else:
                                 # Generate consumption data
