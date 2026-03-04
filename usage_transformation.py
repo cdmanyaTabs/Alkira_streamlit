@@ -376,9 +376,18 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None):
         'NET RATE': 'amount_1'
     })
     
-    # Convert amount_1 to string to ensure consistent type (handles mixed numeric/string values)
+    # Round amount_1 to 4 decimal places and convert to string
     if 'amount_1' in filtered_df.columns:
-        filtered_df['amount_1'] = filtered_df['amount_1'].astype(str)
+        def round_amount(val):
+            if pd.isna(val):
+                return ''
+            try:
+                # Convert to Decimal, round to 4 places, then to string
+                return str(Decimal(str(val)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP))
+            except:
+                return str(val)
+        
+        filtered_df['amount_1'] = filtered_df['amount_1'].apply(round_amount)
     
     # Add hardcoded columns with values for each row
     filtered_df['contract_id'] = ''  # TODO: Update with actual value
@@ -1761,9 +1770,9 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                                 # Calculate value * amount_1 using Decimal
                                 sum_product += value_decimal * amount_1_decimal
                         
-                        # Multiply sum by Enterprise Support % and round with ROUND_HALF_UP to 4 decimal places
+                        # Multiply sum by Enterprise Support % and round with ROUND_HALF_UP
                         enterprise_pct_decimal = Decimal(str(enterprise_pct))
-                        calculated_value = float((sum_product * enterprise_pct_decimal).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP))
+                        calculated_value = float((sum_product * enterprise_pct_decimal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
                 
                 # Get invoice number from contract mapping
                 contract_name = es_info.get('contract_name', '')
@@ -1837,8 +1846,8 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                             # Calculate value * amount_1 using Decimal
                             sum_product += value_decimal * amount_1_decimal
                     
-                    # Set calculated value with ROUND_HALF_UP to 4 decimal places
-                    calculated_value = float(sum_product.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP))
+                    # Set calculated value with ROUND_HALF_UP to 2 decimal places
+                    calculated_value = float(sum_product.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
                 
                 # Get invoice number from contract mapping
                 contract_name = prepaid_info.get('contract_name', '')
