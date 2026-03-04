@@ -368,136 +368,82 @@ def main():
                 import traceback
                 st.code(traceback.format_exc())
     
-    # Create Contracts + Invoices in Tabs button (only shown after Process Files completes)
+    # All action buttons (shown after Process Files completes)
     if st.session_state.get('processing_results'):
         results = st.session_state['processing_results']
         
-        # Check if we have processed data ready for contract creation
-        if 'tabs_bt_prepaid_enterprise' in results:
-            st.markdown("---")
-            st.subheader("📤 Push to Tabs API")
-            st.write("Create contracts and invoice obligations in Tabs. This step pushes data to the Tabs API.")
-            
-            if st.button("Create Contracts + Invoices in Tabs", type="primary", key="create_contracts_invoices"):
-                tabs_bt_contract = None
-                invoices_result = None
-                
-                try:
-                    tabs_bt_prepaid_enterprise = results['tabs_bt_prepaid_enterprise']
-                    billing_run_date = results.get('billing_run_date')
+        st.markdown("---")
+        st.subheader("📤 Actions")
+        st.write("Choose any action below. All actions are independent and can be run in any order.")
+        
+        # Create a grid of action buttons
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Button 1: Create Contracts + Invoices
+            if 'tabs_bt_prepaid_enterprise' in results:
+                if st.button("📋 Create Contracts + Invoices in Tabs", type="primary", key="create_contracts_invoices", use_container_width=True):
+                    tabs_bt_contract = None
+                    invoices_result = None
                     
-                    # Step 1: Create Contracts
                     try:
-                        with st.spinner("Creating contracts in Tabs..."):
-                            tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise, st)
-                            contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
-                            st.success(f"✓ Contract creation completed: {contracts_created} contracts created")
-                            results['tabs_bt_contract'] = tabs_bt_contract
-                    except Exception as contract_error:
-                        st.error(f"❌ Error during contract creation: {str(contract_error)}")
-                        import traceback
-                        with st.expander("View Error Details"):
-                            st.code(traceback.format_exc())
-                        # Continue to invoices even if contracts failed
-                        if tabs_bt_contract is None:
-                            tabs_bt_contract = tabs_bt_prepaid_enterprise
-                    
-                    # Step 2: Create Invoices (continue even if some contracts failed)
-                    if tabs_bt_contract is not None:
+                        tabs_bt_prepaid_enterprise = results['tabs_bt_prepaid_enterprise']
+                        billing_run_date = results.get('billing_run_date')
+                        
+                        # Step 1: Create Contracts
                         try:
-                            with st.spinner("Creating invoices and pushing to Tabs API..."):
-                                invoices_result = create_invoices(tabs_bt_contract, st)
-                                success_count = (invoices_result['push_status'] == 'SUCCESS').sum() if 'push_status' in invoices_result.columns else 0
-                                st.success(f"✓ Invoice creation completed: {success_count} invoices created")
-                                results['invoices_result'] = invoices_result
-                        except Exception as invoice_error:
-                            st.error(f"❌ Error during invoice creation: {str(invoice_error)}")
+                            with st.spinner("Creating contracts in Tabs..."):
+                                tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise, st)
+                                contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
+                                st.success(f"✓ Contract creation completed: {contracts_created} contracts created")
+                                results['tabs_bt_contract'] = tabs_bt_contract
+                        except Exception as contract_error:
+                            st.error(f"❌ Error during contract creation: {str(contract_error)}")
                             import traceback
                             with st.expander("View Error Details"):
                                 st.code(traceback.format_exc())
-                    else:
-                        st.warning("⚠️ Skipping invoice creation due to contract creation failure")
-                    
-                    # Update session state
-                    st.session_state['processing_results'] = results
-                    
-                    # Show final status
-                    if tabs_bt_contract is not None and invoices_result is not None:
-                        st.success("✅ Contracts and Invoices process completed!")
-                    elif tabs_bt_contract is not None:
-                        st.warning("⚠️ Contracts created but invoices failed. Check errors above.")
-                    else:
-                        st.error("❌ Both contracts and invoices failed. Check errors above.")
-                    
-                    st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"❌ Unexpected error: {str(e)}")
-                    import traceback
-                    with st.expander("View Error Details"):
-                        st.code(traceback.format_exc())
-    
-    # Display CSV outputs if processing was completed
-    if st.session_state.get('processing_results'):
-        st.markdown("---")
-        st.subheader("📥 Download Output Files")
-        results = st.session_state['processing_results']
+                            if tabs_bt_contract is None:
+                                tabs_bt_contract = tabs_bt_prepaid_enterprise
+                        
+                        # Step 2: Create Invoices
+                        if tabs_bt_contract is not None:
+                            try:
+                                with st.spinner("Creating invoices and pushing to Tabs API..."):
+                                    invoices_result = create_invoices(tabs_bt_contract, st)
+                                    success_count = (invoices_result['push_status'] == 'SUCCESS').sum() if 'push_status' in invoices_result.columns else 0
+                                    st.success(f"✓ Invoice creation completed: {success_count} invoices created")
+                                    results['invoices_result'] = invoices_result
+                            except Exception as invoice_error:
+                                st.error(f"❌ Error during invoice creation: {str(invoice_error)}")
+                                import traceback
+                                with st.expander("View Error Details"):
+                                    st.code(traceback.format_exc())
+                        else:
+                            st.warning("⚠️ Skipping invoice creation due to contract creation failure")
+                        
+                        st.session_state['processing_results'] = results
+                        
+                        if tabs_bt_contract is not None and invoices_result is not None:
+                            st.success("✅ Contracts and Invoices process completed!")
+                        elif tabs_bt_contract is not None:
+                            st.warning("⚠️ Contracts created but invoices failed. Check errors above.")
+                        else:
+                            st.error("❌ Both contracts and invoices failed. Check errors above.")
+                        
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"❌ Unexpected error: {str(e)}")
+                        import traceback
+                        with st.expander("View Error Details"):
+                            st.code(traceback.format_exc())
         
-        # Billing Terms CSV
-        # Use invoices_result if contracts have been created, otherwise use tabs_bt_prepaid_enterprise
-        billing_terms_df = None
-        if 'invoices_result' in results and not results['invoices_result'].empty:
-            billing_terms_df = results['invoices_result']
-            csv_title = "Billing Terms CSV (with Contract IDs & Push Status)"
-        elif 'tabs_bt_prepaid_enterprise' in results and not results['tabs_bt_prepaid_enterprise'].empty:
-            billing_terms_df = results['tabs_bt_prepaid_enterprise']
-            csv_title = "Billing Terms CSV (Processed Data)"
-        
-        if billing_terms_df is not None:
-            st.markdown(f"### {csv_title}")
-            st.info(f"Rows: {len(billing_terms_df)} | Columns: {len(billing_terms_df.columns)}")
-            
-            # Convert to CSV
-            csv_billing = billing_terms_df.to_csv(index=False)
-            
-            # Display preview
-            with st.expander("Preview Billing Terms Data"):
-                st.dataframe(billing_terms_df.head(20))
-            
-            # Download button
-            st.download_button(
-                label="Download Billing Terms CSV",
-                data=csv_billing,
-                file_name="billing_terms.csv",
-                mime="text/csv"
-            )
-        
-        # Usage CSV
-        if 'usage_output' in results:
-            usage_df = results['usage_output']
-            if not usage_df.empty:
-                st.markdown("### Usage CSV")
-                st.info(f"Rows: {len(usage_df)} | Columns: {len(usage_df.columns)}")
-                
-                # Convert to CSV (exclude event_type_id, keep only event_type_name)
-                columns_to_export = ['customer_id', 'event_type_name', 'datetime', 'value', 'differentiator', 'invoice']
-                csv_usage = usage_df[columns_to_export].to_csv(index=False)
-                
-                # Display preview
-                with st.expander("Preview Usage Data"):
-                    st.dataframe(usage_df.head(20))
-                
-                # Download button
-                st.download_button(
-                    label="Download Usage CSV",
-                    data=csv_usage,
-                    file_name="tabs_ready_usage.csv",
-                    mime="text/csv"
-                )
-                
-                # Push Usage Events to Tabs button
-                st.markdown("### Push Usage Events to Tabs")
-                if st.button("Push Usage Events to Tabs", type="primary"):
+        with col2:
+            # Button 2: Push Usage Events
+            if 'usage_output' in results:
+                usage_df = results['usage_output']
+                if not usage_df.empty:
+                    if st.button("📊 Push Usage Events to Tabs", type="primary", key="push_usage", use_container_width=True):
                     try:
                         from api import create_usage_events_bulk
                         
@@ -580,10 +526,14 @@ def main():
                         st.error(f"Error pushing usage events: {str(e)}")
                         import traceback
                         st.code(traceback.format_exc())
-                
-                # Apply Prepaid Button
-                st.markdown("### Apply Prepaid")
-                if st.button("Apply Prepaid", type="primary"):
+        
+        # Second row of buttons
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            # Button 3: Apply Prepaid
+            if 'tabs_bt_contract' in results:
+                if st.button("💰 Apply Prepaid", type="primary", key="apply_prepaid", use_container_width=True):
                     try:
                         from api import mark_contract_processed, get_invoices, create_usage_event
                         
