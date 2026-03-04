@@ -444,88 +444,88 @@ def main():
                 usage_df = results['usage_output']
                 if not usage_df.empty:
                     if st.button("📊 Push Usage Events to Tabs", type="primary", key="push_usage", use_container_width=True):
-                    try:
-                        from api import create_usage_events_bulk
-                        
-                        # Exclude Prepaid rows from usage events push
-                        filtered_usage = usage_df[~usage_df['event_type_name'].str.contains('Prepaid', case=False, na=False)]
-                        
-                        # Convert filtered usage to list of event dictionaries
-                        events_list = []
-                        for _, row in filtered_usage.iterrows():
-                            # invoice column already contains the correct format (blank, 1, 2, 3...)
-                            # Just use it directly as invoice_split_key
-                            invoice_split_key = str(row.get('invoice', ''))
+                        try:
+                            from api import create_usage_events_bulk
                             
-                            event = {
-                                'customer_id': str(row.get('customer_id', '')),
-                                'event_type_id': str(row.get('event_type_id', '')),
-                                'datetime': str(row.get('datetime', '')),
-                                'value': float(row.get('value', 0)) if pd.notna(row.get('value')) else 0,
-                                'differentiator': str(row.get('differentiator', '')),
-                                'invoice_split_key': invoice_split_key
-                            }
-                            events_list.append(event)
-                        
-                        if events_list:
-                            with st.spinner(f"Pushing {len(events_list)} usage events to Tabs..."):
-                                result = create_usage_events_bulk(events_list)
+                            # Exclude Prepaid rows from usage events push
+                            filtered_usage = usage_df[~usage_df['event_type_name'].str.contains('Prepaid', case=False, na=False)]
                             
-                            # Check success/failure counts from bulk response
-                            success_count = result.get('success_count', 0)
-                            failure_count = result.get('failure_count', 0)
-                            total = result.get('total', 0)
-                            
-                            if failure_count == 0:
-                                st.success(f"✅ Successfully pushed {success_count}/{total} usage events to Tabs")
+                            # Convert filtered usage to list of event dictionaries
+                            events_list = []
+                            for _, row in filtered_usage.iterrows():
+                                # invoice column already contains the correct format (blank, 1, 2, 3...)
+                                # Just use it directly as invoice_split_key
+                                invoice_split_key = str(row.get('invoice', ''))
                                 
-                                # Mark all unique contracts as processed (excluding Prepaid)
-                                try:
-                                    from api import mark_contract_processed
-                                    tabs_bt_contract = results.get('tabs_bt_contract')
+                                event = {
+                                    'customer_id': str(row.get('customer_id', '')),
+                                    'event_type_id': str(row.get('event_type_id', '')),
+                                    'datetime': str(row.get('datetime', '')),
+                                    'value': float(row.get('value', 0)) if pd.notna(row.get('value')) else 0,
+                                    'differentiator': str(row.get('differentiator', '')),
+                                    'invoice_split_key': invoice_split_key
+                                }
+                                events_list.append(event)
+                            
+                            if events_list:
+                                with st.spinner(f"Pushing {len(events_list)} usage events to Tabs..."):
+                                    result = create_usage_events_bulk(events_list)
+                                
+                                # Check success/failure counts from bulk response
+                                success_count = result.get('success_count', 0)
+                                failure_count = result.get('failure_count', 0)
+                                total = result.get('total', 0)
+                                
+                                if failure_count == 0:
+                                    st.success(f"✅ Successfully pushed {success_count}/{total} usage events to Tabs")
                                     
-                                    if tabs_bt_contract is not None and not tabs_bt_contract.empty:
-                                        # Filter out Prepaid rows
-                                        non_prepaid_bt = tabs_bt_contract[~tabs_bt_contract['name'].str.contains('Prepaid', case=False, na=False)]
-                                        unique_contracts = non_prepaid_bt['contract_id'].dropna().unique()
+                                    # Mark all unique contracts as processed (excluding Prepaid)
+                                    try:
+                                        from api import mark_contract_processed
+                                        tabs_bt_contract = results.get('tabs_bt_contract')
                                         
-                                        mark_success = 0
-                                        mark_fail = 0
+                                        if tabs_bt_contract is not None and not tabs_bt_contract.empty:
+                                            # Filter out Prepaid rows
+                                            non_prepaid_bt = tabs_bt_contract[~tabs_bt_contract['name'].str.contains('Prepaid', case=False, na=False)]
+                                            unique_contracts = non_prepaid_bt['contract_id'].dropna().unique()
+                                            
+                                            mark_success = 0
+                                            mark_fail = 0
+                                            
+                                            with st.spinner(f"Marking {len(unique_contracts)} contract(s) as processed..."):
+                                                for contract_id in unique_contracts:
+                                                    if contract_id and str(contract_id) != 'nan' and str(contract_id) != '':
+                                                        result = mark_contract_processed(str(contract_id))
+                                                        if result.get('success'):
+                                                            mark_success += 1
+                                                        else:
+                                                            mark_fail += 1
+                                            
+                                            if mark_fail == 0:
+                                                st.success(f"✅ Marked {mark_success} contract(s) as processed")
+                                            else:
+                                                st.warning(f"⚠️ Marked {mark_success} contract(s). {mark_fail} failed.")
+                                    except Exception as mark_error:
+                                        st.warning(f"⚠️ Usage events pushed but failed to mark contracts: {str(mark_error)}")
                                         
-                                        with st.spinner(f"Marking {len(unique_contracts)} contract(s) as processed..."):
-                                            for contract_id in unique_contracts:
-                                                if contract_id and str(contract_id) != 'nan' and str(contract_id) != '':
-                                                    result = mark_contract_processed(str(contract_id))
-                                                    if result.get('success'):
-                                                        mark_success += 1
-                                                    else:
-                                                        mark_fail += 1
-                                        
-                                        if mark_fail == 0:
-                                            st.success(f"✅ Marked {mark_success} contract(s) as processed")
-                                        else:
-                                            st.warning(f"⚠️ Marked {mark_success} contract(s). {mark_fail} failed.")
-                                except Exception as mark_error:
-                                    st.warning(f"⚠️ Usage events pushed but failed to mark contracts: {str(mark_error)}")
-                                    
-                            elif success_count > 0:
-                                st.warning(f"⚠️ Pushed {success_count}/{total} events. {failure_count} failed.")
-                                if result.get('failures'):
-                                    with st.expander("View Errors"):
-                                        for failure in result.get('failures', []):
-                                            st.error(f"Event {failure.get('index')}: {failure.get('error')}")
+                                elif success_count > 0:
+                                    st.warning(f"⚠️ Pushed {success_count}/{total} events. {failure_count} failed.")
+                                    if result.get('failures'):
+                                        with st.expander("View Errors"):
+                                            for failure in result.get('failures', []):
+                                                st.error(f"Event {failure.get('index')}: {failure.get('error')}")
+                                else:
+                                    st.error(f"❌ Failed to push events. {failure_count}/{total} failed.")
+                                    if result.get('failures'):
+                                        with st.expander("View Errors"):
+                                            for failure in result.get('failures', []):
+                                                st.error(f"Event {failure.get('index')}: {failure.get('error')}")
                             else:
-                                st.error(f"❌ Failed to push events. {failure_count}/{total} failed.")
-                                if result.get('failures'):
-                                    with st.expander("View Errors"):
-                                        for failure in result.get('failures', []):
-                                            st.error(f"Event {failure.get('index')}: {failure.get('error')}")
-                        else:
-                            st.warning("No usage events to push")
-                    except Exception as e:
-                        st.error(f"Error pushing usage events: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
+                                st.warning("No usage events to push")
+                        except Exception as e:
+                            st.error(f"Error pushing usage events: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
         
         # Second row of buttons
         col3, col4 = st.columns(2)
@@ -647,75 +647,122 @@ def main():
                         st.error(f"Error applying Prepaid: {str(e)}")
                         import traceback
                         st.code(traceback.format_exc())
+        
+        with col4:
+            # Button 4: Update Google Sheets
+            if 'usage_output' in results:
+                usage_df = results['usage_output']
+                if not usage_df.empty:
+                    with st.popover("📊 Update Google Sheets", use_container_width=True):
+                        st.write("**Update Google Sheets Reports**")
+                        st.caption("Reports: [Open Spreadsheet](https://docs.google.com/spreadsheets/d/10Znr32hQQRS1qOcVQIqAtg9PU_6ht5z7WjfXyaL47i4/edit?usp=sharing)")
+                        
+                        if st.button("Update Prepaid Sheet", type="secondary", key="update_prepaid", use_container_width=True):
+                            try:
+                                from google_sheets import update_prepaid_sheet
+                                
+                                billing_terms_data = results.get('tabs_bt_contract')
+                                if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                    billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
+                                
+                                if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                    st.error("No billing terms data available")
+                                else:
+                                    prepaid_data = generate_prepaid_report_data(usage_df, billing_terms_data)
+                                    
+                                    if prepaid_data:
+                                        with st.spinner("Updating Prepaid Sheet..."):
+                                            result = update_prepaid_sheet(prepaid_data)
+                                        
+                                        if result.get('success'):
+                                            st.success(result.get('message'))
+                                        else:
+                                            st.error(result.get('message'))
+                                    else:
+                                        st.warning("No prepaid data found to update")
+                            except ImportError:
+                                st.error("Google Sheets integration not configured.")
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
+                        
+                        if st.button("Update Commit Consumption Sheet", type="secondary", key="update_consumption", use_container_width=True):
+                            try:
+                                from google_sheets import update_commit_consumption_sheet
+                                
+                                billing_terms_data = results.get('tabs_bt_contract')
+                                if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                    billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
+                                billing_run_date = results.get('billing_run_date', datetime.now().strftime('%Y-%m-%d'))
+                                
+                                if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                    st.error("No billing terms data available")
+                                else:
+                                    consumption_data = generate_commit_consumption_data(usage_df, billing_terms_data)
+                                    
+                                    if consumption_data:
+                                        with st.spinner("Updating Commit Consumption Sheet..."):
+                                            result = update_commit_consumption_sheet(consumption_data, billing_run_date)
+                                        
+                                        if result.get('success'):
+                                            st.success(result.get('message'))
+                                        else:
+                                            st.error(result.get('message'))
+                                    else:
+                                        st.warning("No consumption data found to update")
+                            except ImportError:
+                                st.error("Google Sheets integration not configured.")
+                            except Exception as e:
+                                st.error(f"Error: {str(e)}")
+        
+        # Download section
+        st.markdown("---")
+        st.subheader("📥 Download Output Files")
+        
+        # Billing Terms CSV
+        billing_terms_df = None
+        if 'invoices_result' in results and not results['invoices_result'].empty:
+            billing_terms_df = results['invoices_result']
+            csv_title = "Billing Terms CSV (with Contract IDs & Push Status)"
+        elif 'tabs_bt_prepaid_enterprise' in results and not results['tabs_bt_prepaid_enterprise'].empty:
+            billing_terms_df = results['tabs_bt_prepaid_enterprise']
+            csv_title = "Billing Terms CSV (Processed Data)"
+        
+        if billing_terms_df is not None:
+            st.markdown(f"### {csv_title}")
+            st.info(f"Rows: {len(billing_terms_df)} | Columns: {len(billing_terms_df.columns)}")
+            
+            csv_billing = billing_terms_df.to_csv(index=False)
+            
+            with st.expander("Preview Billing Terms Data"):
+                st.dataframe(billing_terms_df.head(20))
+            
+            st.download_button(
+                label="Download Billing Terms CSV",
+                data=csv_billing,
+                file_name="billing_terms.csv",
+                mime="text/csv"
+            )
+        
+        # Usage CSV
+        if 'usage_output' in results:
+            usage_df = results['usage_output']
+            if not usage_df.empty:
+                st.markdown("### Usage CSV")
+                st.info(f"Rows: {len(usage_df)} | Columns: {len(usage_df.columns)}")
                 
-                # Google Sheets Update Buttons
-                st.markdown("### Update Google Sheets Reports")
-                st.write("Reports can be found here: https://docs.google.com/spreadsheets/d/10Znr32hQQRS1qOcVQIqAtg9PU_6ht5z7WjfXyaL47i4/edit?usp=sharing !")
+                columns_to_export = ['customer_id', 'event_type_name', 'datetime', 'value', 'differentiator', 'invoice']
+                csv_usage = usage_df[columns_to_export].to_csv(index=False)
+                
+                with st.expander("Preview Usage Data"):
+                    st.dataframe(usage_df.head(20))
+                
+                st.download_button(
+                    label="Download Usage CSV",
+                    data=csv_usage,
+                    file_name="tabs_ready_usage.csv",
+                    mime="text/csv"
+                )
 
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    if st.button("Update Prepaid Sheet", type="secondary"):
-                        try:
-                            from google_sheets import update_prepaid_sheet
-                            
-                            # Get billing terms data - prefer tabs_bt_contract if available
-                            billing_terms_data = results.get('tabs_bt_contract')
-                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
-                                billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
-                            
-                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
-                                st.error("No billing terms data available")
-                            else:
-                                # Generate prepaid data
-                                prepaid_data = generate_prepaid_report_data(usage_df, billing_terms_data)
-                                
-                                if prepaid_data:
-                                    with st.spinner("Updating Prepaid Sheet..."):
-                                        result = update_prepaid_sheet(prepaid_data)
-                                    
-                                    if result.get('success'):
-                                        st.success(result.get('message'))
-                                    else:
-                                        st.error(result.get('message'))
-                                else:
-                                    st.warning("No prepaid data found to update")
-                        except ImportError:
-                            st.error("Google Sheets integration not configured. Please set up service account credentials.")
-                        except Exception as e:
-                            st.error(f"Error: {str(e)}")
-                
-                with col2:
-                    if st.button("Update Commit Consumption Sheet", type="secondary"):
-                        try:
-                            from google_sheets import update_commit_consumption_sheet
-                            
-                            # Get billing terms data - prefer tabs_bt_contract if available
-                            billing_terms_data = results.get('tabs_bt_contract')
-                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
-                                billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
-                            billing_run_date = results.get('billing_run_date', datetime.now().strftime('%Y-%m-%d'))
-                            
-                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
-                                st.error("No billing terms data available")
-                            else:
-                                # Generate consumption data
-                                consumption_data = generate_commit_consumption_data(usage_df, billing_terms_data)
-                                
-                                if consumption_data:
-                                    with st.spinner("Updating Commit Consumption Sheet..."):
-                                        result = update_commit_consumption_sheet(consumption_data, billing_run_date)
-                                    
-                                    if result.get('success'):
-                                        st.success(result.get('message'))
-                                    else:
-                                        st.error(result.get('message'))
-                                else:
-                                    st.warning("No consumption data found to update")
-                        except ImportError:
-                            st.error("Google Sheets integration not configured. Please set up service account credentials.")
-                        except Exception as e:
-                            st.error(f"Error: {str(e)}")
 
 if __name__ == "__main__":
     # Check if user is authenticated
