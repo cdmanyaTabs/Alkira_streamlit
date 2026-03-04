@@ -314,6 +314,37 @@ def main():
                                 if not usage_output.empty:
                                     st.success(f"✓ Step 5: Created Tabs Ready Usage ({len(usage_output)} rows)")
                                     results['usage_output'] = usage_output
+                                    
+                                    # Filter billing terms to only include rows with usage data
+                                    # Keep: rows with usage + Enterprise Support + Prepaid
+                                    with st.spinner("Filtering billing terms based on usage data..."):
+                                        # Get unique (customer_id, SKU name) from usage output
+                                        usage_keys = set(zip(
+                                            usage_output['customer_id'],
+                                            usage_output['event_type_name'].str.lower()
+                                        ))
+                                        
+                                        # Filter billing terms
+                                        def should_keep_row(row):
+                                            customer_id = row.get('customer_id')
+                                            name = str(row.get('name', '')).lower()
+                                            
+                                            # Keep Enterprise Support and Prepaid regardless
+                                            if 'enterprise support' in name or 'prepaid' in name:
+                                                return True
+                                            
+                                            # Keep if usage data exists
+                                            return (customer_id, name) in usage_keys
+                                        
+                                        filtered_bt = tabs_bt_prepaid_enterprise[
+                                            tabs_bt_prepaid_enterprise.apply(should_keep_row, axis=1)
+                                        ].copy()
+                                        
+                                        removed_count = len(tabs_bt_prepaid_enterprise) - len(filtered_bt)
+                                        st.success(f"✓ Filtered billing terms: keeping {len(filtered_bt)} rows (removed {removed_count} rows without usage)")
+                                        
+                                        # Update the billing terms to only include rows with usage
+                                        results['tabs_bt_prepaid_enterprise'] = filtered_bt
                                 else:
                                     st.warning("Step 5: Usage output is empty")
                         else:

@@ -1378,6 +1378,14 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                                     tenant_to_customer_id[str(account_value)] = tabs_customer_id
                                 break
             
+            debug(f"\n=== Tenant ID Mapping Created ===")
+            debug(f"Total mappings: {len(tenant_to_customer_id)}")
+            if tenant_to_customer_id:
+                sample_keys = list(tenant_to_customer_id.keys())[:10]
+                debug(f"Sample tenant IDs in Tabs: {sample_keys}")
+            else:
+                debug("WARNING: No tenant ID mappings created!")
+            
             # Map Tenant ID to customer_id in raw usage
             raw_usage_df['customer_id'] = raw_usage_df['Tenant ID'].map(tenant_to_customer_id)
             
