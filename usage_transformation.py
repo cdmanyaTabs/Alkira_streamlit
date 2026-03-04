@@ -3,6 +3,7 @@ import zipfile
 import io
 import re
 import json
+import math
 import pandas as pd
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
@@ -1941,10 +1942,17 @@ def generate_prepaid_report_data(usage_df: pd.DataFrame, tabs_bt_contract: pd.Da
             except (ValueError, TypeError):
                 value_float = 0
             
+            # Skip if value is NaN or infinite
+            if pd.isna(value_float) or not math.isfinite(value_float):
+                continue
+            
             if tenant_id in prepaid_values:
                 prepaid_values[tenant_id] += value_float
             else:
                 prepaid_values[tenant_id] = value_float
+    
+    # Filter out any NaN or infinite values before returning
+    prepaid_values = {k: v for k, v in prepaid_values.items() if pd.notna(v) and math.isfinite(v)}
     
     return prepaid_values
 
@@ -2027,10 +2035,17 @@ def generate_commit_consumption_data(usage_df: pd.DataFrame, tabs_bt_contract: p
         # Calculate amount_1 * meter_value
         product = amount_1 * meter_float
         
+        # Skip if product is NaN or infinite
+        if pd.isna(product) or not math.isfinite(product):
+            continue
+        
         key = (tenant_id, contract_name)
         if key in consumption_values:
             consumption_values[key] += product
         else:
             consumption_values[key] = product
+    
+    # Filter out any NaN or infinite values before returning
+    consumption_values = {k: v for k, v in consumption_values.items() if pd.notna(v) and math.isfinite(v)}
     
     return consumption_values
