@@ -1156,7 +1156,7 @@ def create_invoices(tabs_bt_contract, st=None):
         if st:
             st.write(f"Pushing {len(result_df)} billing terms to Tabs API...")
         
-        response = push_bt(csv_file_data)
+        response = push_bt(csv_file_data, st=st)
         
         # Handle response
         if response and hasattr(response, 'status_code'):

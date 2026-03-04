@@ -217,7 +217,7 @@ def get_invoices(customer_id: str, contract_id: str) -> dict:
         }
 
 
-def push_bt(csv_file_data, merchant_name='alkira'):
+def push_bt(csv_file_data, merchant_name='alkira', st=None):
     """
     Push billing terms to Tabs API using the new v3/contracts/{id}/obligations endpoint.
     Parses CSV data and creates individual obligations for each row.
@@ -270,9 +270,20 @@ def push_bt(csv_file_data, merchant_name='alkira'):
     successful_count = 0
     failed_count = 0
     
+    # Show progress in UI
+    if st:
+        st.write(f"Pushing {total_rows} billing terms to Tabs API...")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+    
     # Process each row
     for idx, row in df.iterrows():
         try:
+            # Update progress
+            if st:
+                progress = (idx + 1) / total_rows
+                progress_bar.progress(progress)
+                status_text.text(f"Processing billing term {idx + 1}/{total_rows}")
             # Extract contract_id
             contract_id = row.get('contract_id', '')
             if not contract_id or pd.isna(contract_id):
@@ -396,7 +407,10 @@ def push_bt(csv_file_data, merchant_name='alkira'):
                     if obligation_id:
                         obligation_ids.append(obligation_id)
                         successful_count += 1
-                        print(f"✓ push_bt: Created obligation {obligation_id} for contract {contract_id} (row {idx + 1})")
+                        msg = f"✓ Created billing term for contract {contract_id} ({name})"
+                        print(msg)
+                        if st and idx % 10 == 0:  # Show every 10th success to avoid UI clutter
+                            st.success(msg, icon="✓")
                     else:
                         print(f"⚠ push_bt: API call succeeded for row {idx + 1} but no obligation ID in response")
                         successful_count += 1
@@ -424,15 +438,35 @@ def push_bt(csv_file_data, merchant_name='alkira'):
                 # Also print the payload that was sent for debugging (without sensitive data)
                 print(f"  Debug - Payload sent: contract_id={contract_id}, name={name}, amount={amount}, event_type_id={event_type_id}, service_start_date={service_start_date}, service_end_date={service_end_date}")
                 
-                print(f"✗ push_bt: Failed to create obligation for contract {contract_id} (row {idx + 1}): {error_msg}")
+                full_error_msg = f"✗ Failed for contract {contract_id} ({name}): {error_msg}"
+                print(full_error_msg)
+                if st:
+                    st.error(full_error_msg, icon="✗")
                 errors.append(f"Row {idx + 1}: {error_msg}")
                 failed_count += 1
                 
         except Exception as e:
             error_msg = f"Row {idx + 1}: {str(e)}"
-            print(f"✗ push_bt: Error processing row {idx + 1}: {str(e)}")
+            full_error_msg = f"✗ Error processing row {idx + 1}: {str(e)}"
+            print(full_error_msg)
+            if st:
+                st.error(full_error_msg, icon="✗")
             errors.append(error_msg)
             failed_count += 1
+    
+    # Clear progress indicators
+    if st:
+        progress_bar.empty()
+        status_text.empty()
+        
+        # Show final summary
+        st.write("---")
+        st.write(f"**Billing Terms Push Summary:** {successful_count} succeeded, {failed_count} failed out of {total_rows} total")
+        
+        if errors:
+            with st.expander(f"⚠️ View {len(errors)} Failed Billing Terms"):
+                for error in errors:
+                    st.write(f"- {error}")
     
     # Print summary
     print(f"✓ push_bt: Processed {total_rows} row(s) - {successful_count} successful, {failed_count} failed")
