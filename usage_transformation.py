@@ -1159,7 +1159,7 @@ def create_invoices(tabs_bt_contract):
         return tabs_bt_contract
 
 
-def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise_support_file=None, billing_run_date=None):
+def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise_support_file=None, billing_run_date=None, st=None):
     """
     Generate CSV-ready DataFrame from tabs_bt_contract.
     Creates one usage row for each billing term in tabs_bt_contract.
@@ -1179,30 +1179,47 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         return pd.DataFrame()
     
     if tabs_bt_contract is None or tabs_bt_contract.empty:
-        print("Warning: tabs_bt_contract is empty or None, cannot create usage rows")
+        msg = "Warning: tabs_bt_contract is empty or None, cannot create usage rows"
+        print(msg)
+        if st:
+            st.warning(msg)
         return pd.DataFrame()
     
+    def debug(msg):
+        print(msg)
+        if st:
+            st.write(msg)
+    
     # Debug: Log initial tabs_bt_contract info
-    print(f"\n=== DEBUG: create_tabs_ready_usage ===")
-    print(f"Initial tabs_bt_contract rows: {len(tabs_bt_contract)}")
+    debug(f"\n=== DEBUG: create_tabs_ready_usage ===")
+    debug(f"Initial tabs_bt_contract rows: {len(tabs_bt_contract)}")
     if 'customer_id' in tabs_bt_contract.columns:
         unique_customer_ids_bt = tabs_bt_contract['customer_id'].nunique()
-        print(f"Unique customer_ids in tabs_bt_contract: {unique_customer_ids_bt}")
+        debug(f"Unique customer_ids in tabs_bt_contract: {unique_customer_ids_bt}")
         if 'name' in tabs_bt_contract.columns:
             unique_names_bt = tabs_bt_contract['name'].nunique()
-            print(f"Unique SKU names in tabs_bt_contract: {unique_names_bt}")
+            debug(f"Unique SKU names in tabs_bt_contract: {unique_names_bt}")
     
     try:
         # Read the raw monthly usage file to create lookup dictionary
         file_extension = raw_monthly_usage_file.name.split('.')[-1].lower()
+        
+        debug(f"\n=== Reading Raw Usage File ===")
+        debug(f"File name: {raw_monthly_usage_file.name}")
+        debug(f"File extension: {file_extension}")
         
         if file_extension == 'csv':
             raw_usage_df = pd.read_csv(raw_monthly_usage_file)
         elif file_extension in ['xlsx', 'xls']:
             raw_usage_df = pd.read_excel(raw_monthly_usage_file)
         else:
-            print(f"Unsupported file type: {file_extension}")
+            msg = f"Unsupported file type: {file_extension}"
+            print(msg)
+            if st:
+                st.error(msg)
             return pd.DataFrame()
+        
+        debug(f"Raw usage file loaded: {len(raw_usage_df)} rows")
         
         # Check if required columns exist in raw usage file (including Contract/SFDC# and Tenant Name)
         # Prefer 'Contract' if it has values, otherwise use 'SFDC#'
@@ -1227,12 +1244,28 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         if contract_col is None:
             missing_columns.append('Contract or SFDC#')
         
+        debug(f"\n=== Column Validation ===")
+        debug(f"Required columns: {required_columns}")
+        debug(f"Available columns: {list(raw_usage_df.columns)}")
+        debug(f"Missing columns: {missing_columns if missing_columns else 'None'}")
+        
         if missing_columns:
-            print(f"Error: Missing required columns in raw monthly usage file: {', '.join(missing_columns)}")
+            msg = f"Error: Missing required columns in raw monthly usage file: {', '.join(missing_columns)}"
+            print(msg)
+            if st:
+                st.error(msg)
             raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
         
         # Convert columns to string for matching
         # Convert tenant IDs to int first to remove .0, then to string for consistent matching
+        # First, filter out rows with NaN Tenant IDs, then do the conversion
+        initial_row_count = len(raw_usage_df)
+        raw_usage_df = raw_usage_df[raw_usage_df['Tenant ID'].notna()].copy()
+        rows_after_filter = len(raw_usage_df)
+        if initial_row_count != rows_after_filter:
+            msg = f"Filtered out {initial_row_count - rows_after_filter} rows with null Tenant IDs"
+            debug(msg)
+        
         raw_usage_df['Tenant ID'] = raw_usage_df['Tenant ID'].astype(float).astype(int).astype(str)
         raw_usage_df['Tenant Name'] = raw_usage_df['Tenant Name'].astype(str)
         raw_usage_df['Contract'] = raw_usage_df[contract_col].astype(str)  # Normalize to 'Contract'
@@ -1241,7 +1274,9 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         
         # Get all customers from API to map tenant_id to Tabs Customer ID
         try:
+            debug(f"\n=== Fetching Customers from API ===")
             customers_data = get_all_customers()
+            debug(f"Fetched {len(customers_data)} customers from API")
             
             # Create mapping dictionary: tenant_id -> tabs_customer_id
             tenant_to_customer_id = {}
@@ -1278,14 +1313,23 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             # Map Tenant ID to customer_id in raw usage
             raw_usage_df['customer_id'] = raw_usage_df['Tenant ID'].map(tenant_to_customer_id)
             
+            debug(f"\n=== Tenant ID to Customer ID Mapping ===")
+            debug(f"Raw usage rows after mapping: {len(raw_usage_df)}")
+            debug(f"Sample Tenant IDs from raw usage: {raw_usage_df['Tenant ID'].head(5).tolist()}")
+            debug(f"Sample customer_ids after mapping: {raw_usage_df['customer_id'].head(5).tolist()}")
+            
             # Check for unmatched tenant IDs
             unmatched_rows = raw_usage_df[raw_usage_df['customer_id'].isna()]
             if not unmatched_rows.empty:
                 unmatched_tenant_ids = unmatched_rows['Tenant ID'].unique()
-                print(f"Warning: No matching Tabs Customer ID found for tenant ID(s): {', '.join(sorted(unmatched_tenant_ids, key=str))}")
+                msg = f"Warning: No matching Tabs Customer ID found for {len(unmatched_tenant_ids)} tenant ID(s): {', '.join(sorted(unmatched_tenant_ids, key=str)[:5])}"
+                print(msg)
+                if st:
+                    st.warning(msg)
             
             # Filter out rows where customer_id mapping failed
             raw_usage_df = raw_usage_df[raw_usage_df['customer_id'].notna()].copy()
+            debug(f"Rows after filtering out unmapped: {len(raw_usage_df)}")
             
             # Create a lookup dictionary: (customer_id, SKU Name, Contract, Tenant Name) -> Meter value (sum if multiple rows)
             # This groups by Tenant Name so different Tenant Names keep separate rows
@@ -1309,7 +1353,11 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 except (ValueError, TypeError):
                     pass
             
-            print(f"Created usage lookup with {len(usage_lookup)} (customer_id, SKU, Contract, Tenant Name) combinations")
+            debug(f"\n=== Usage Lookup Created ===")
+            debug(f"Total lookup entries: {len(usage_lookup)}")
+            if usage_lookup:
+                sample_keys = list(usage_lookup.keys())[:3]
+                debug(f"Sample lookup keys: {sample_keys}")
             
             # Create invoice number mapping: For each Tenant ID, assign sequential numbers to unique Tenant Names
             # invoice_mapping: (Tenant ID, Tenant Name) -> invoice number
@@ -1333,10 +1381,16 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                     else:
                         invoice_mapping[(tenant_id, tenant_name)] = idx - 1
             
-            print(f"Created invoice mapping for {len(invoice_mapping)} (Tenant ID, Tenant Name) combinations")
+            debug(f"\n=== Invoice Mapping Created ===")
+            debug(f"Total invoice mappings: {len(invoice_mapping)}")
             
         except Exception as e:
-            print(f"Error fetching customers from API: {str(e)}")
+            msg = f"Error fetching customers from API: {str(e)}"
+            print(msg)
+            if st:
+                st.error(msg)
+            import traceback
+            traceback.print_exc()
             return pd.DataFrame()
         
         # Use billing_run_date if provided, otherwise use date two weeks ago
@@ -1405,16 +1459,29 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 # Add to valid billing terms set (using lowercase SKU name)
                 valid_billing_terms.add((customer_id, sku_name_lower, contract_name))
         
+        debug(f"\n=== Valid Billing Terms from Price Book ===")
+        debug(f"Total valid billing terms: {len(valid_billing_terms)}")
+        if valid_billing_terms:
+            sample_bt = list(valid_billing_terms)[:3]
+            debug(f"Sample billing terms: {sample_bt}")
+        debug(f"Enterprise Support rows: {len(enterprise_support_rows)}")
+        debug(f"Prepaid rows: {len(prepaid_rows)}")
+        
         # Create output_df by iterating through usage_lookup
         # This creates one row per unique (customer_id, SKU, Contract, Tenant Name) combination
         output_rows = []
+        matched_count = 0
+        unmatched_count = 0
         for lookup_key, meter_value in usage_lookup.items():
             customer_id, sku_name_lower, contract, tenant_name = lookup_key
             
             # Only include rows that match a billing term in tabs_bt_contract
             # Note: sku_name_lower is already lowercase from usage_lookup
             if (customer_id, sku_name_lower, contract) not in valid_billing_terms:
+                unmatched_count += 1
                 continue
+            
+            matched_count += 1
             
             # Get tenant_id from customer_id for invoice lookup
             tenant_id = customer_id_to_tenant_id.get(customer_id, '')
@@ -1440,6 +1507,13 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         
         # Create initial output_df from regular billing terms
         output_df = pd.DataFrame(output_rows)
+        
+        debug(f"\n=== Matching Results ===")
+        debug(f"Total usage lookup entries: {len(usage_lookup)}")
+        debug(f"Matched with billing terms: {matched_count}")
+        debug(f"Unmatched (filtered out): {unmatched_count}")
+        debug(f"Output rows created: {len(output_df)}")
+        
         print(f"Created {len(output_df)} usage rows from regular billing terms")
         
         # Create mapping from (customer_id, contract) -> invoice number for Enterprise Support/Prepaid rows
@@ -1733,7 +1807,12 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         return output_df
         
     except Exception as e:
-        print(f"Error processing raw monthly usage file: {str(e)}")
+        msg = f"Error processing raw monthly usage file: {str(e)}"
+        print(msg)
+        if st:
+            st.error(msg)
+        import traceback
+        traceback.print_exc()
         return pd.DataFrame()
 
 

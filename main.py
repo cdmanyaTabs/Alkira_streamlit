@@ -308,7 +308,8 @@ def main():
                                     raw_monthly_usage_file, 
                                     tabs_bt_prepaid_enterprise,  # Use prepaid data, not contracts
                                     enterprise_support_file, 
-                                    billing_run_date
+                                    billing_run_date,
+                                    st  # Pass streamlit for debug output
                                 )
                                 if not usage_output.empty:
                                     st.success(f"✓ Step 5: Created Tabs Ready Usage ({len(usage_output)} rows)")
