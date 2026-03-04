@@ -944,7 +944,7 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None):
         return tabs_bt_enterprise
 
 
-def create_contracts(tabs_bt_prepaid_enterprise):
+def create_contracts(tabs_bt_prepaid_enterprise, st=None):
     """
     Create contracts using all unique customer_id values from the DataFrame.
     Calls the Tabs API to create contracts for each unique customer and updates
@@ -976,37 +976,91 @@ def create_contracts(tabs_bt_prepaid_enterprise):
         # Create a mapping of customer_id -> contract_id
         customer_to_contract_id = {}
         
+        # Progress tracking
+        success_count = 0
+        failed_count = 0
+        failed_customers = []  # Track which customers failed
+        
+        if st:
+            st.write(f"Creating contracts for {len(unique_customer_ids)} customers...")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+        
         # For each unique customer_id, create a contract via API
-        for customer_id in unique_customer_ids:
-            # Find the first row with this customer_id to get reference data
-            matching_rows = tabs_bt_contract[tabs_bt_contract['customer_id'] == customer_id]
-            if not matching_rows.empty:
-                reference_row = matching_rows.iloc[0]
-                tenant_id = reference_row.get('tenant_id', '')
-                invoice_date = reference_row.get('invoice_date', '')
-                
-                # Generate contract name using tenant_id + invoice_date
-                if tenant_id and invoice_date:
-                    contract_name = f"{tenant_id}_{invoice_date}"
-                elif tenant_id:
-                    contract_name = f"{tenant_id}_"
-                elif invoice_date:
-                    contract_name = f"_{invoice_date}"
-                else:
-                    contract_name = f"Contract for Customer {customer_id}"
-                
-                # Call API to create contract
-                contract_id = None
-                try:
-                    result = create_contract(customer_id, contract_name)
-                    if result:
-                        contract_id, full_payload = result
-                        print(f"Successfully created contract {contract_id} for customer {customer_id}")
-                        customer_to_contract_id[customer_id] = contract_id
+        for idx, customer_id in enumerate(unique_customer_ids):
+            try:
+                # Find the first row with this customer_id to get reference data
+                matching_rows = tabs_bt_contract[tabs_bt_contract['customer_id'] == customer_id]
+                if not matching_rows.empty:
+                    reference_row = matching_rows.iloc[0]
+                    tenant_id = reference_row.get('tenant_id', '')
+                    invoice_date = reference_row.get('invoice_date', '')
+                    
+                    # Generate contract name using tenant_id + invoice_date
+                    if tenant_id and invoice_date:
+                        contract_name = f"{tenant_id}_{invoice_date}"
+                    elif tenant_id:
+                        contract_name = f"{tenant_id}_"
+                    elif invoice_date:
+                        contract_name = f"_{invoice_date}"
                     else:
-                        print(f"Warning: Failed to create contract for customer {customer_id}")
-                except Exception as api_error:
-                    print(f"Error creating contract for customer {customer_id}: {str(api_error)}")
+                        contract_name = f"Contract for Customer {customer_id}"
+                    
+                    # Update UI progress
+                    if st:
+                        progress = (idx + 1) / len(unique_customer_ids)
+                        progress_bar.progress(progress)
+                        status_text.text(f"Creating contract for customer {customer_id} ({idx + 1}/{len(unique_customer_ids)})")
+                    
+                    # Call API to create contract
+                    contract_id = None
+                    try:
+                        result = create_contract(customer_id, contract_name)
+                        if result:
+                            contract_id, full_payload = result
+                            success_count += 1
+                            msg = f"✓ Created contract {contract_id} for customer {customer_id} (Tenant: {tenant_id})"
+                            print(msg)
+                            if st:
+                                st.success(msg)
+                            customer_to_contract_id[customer_id] = contract_id
+                        else:
+                            failed_count += 1
+                            failed_customers.append(f"Customer {customer_id} (Tenant: {tenant_id})")
+                            msg = f"✗ Failed to create contract for customer {customer_id} (Tenant: {tenant_id}) - API returned no result"
+                            print(msg)
+                            if st:
+                                st.warning(msg)
+                    except Exception as api_error:
+                        failed_count += 1
+                        failed_customers.append(f"Customer {customer_id} (Tenant: {tenant_id}): {str(api_error)}")
+                        msg = f"✗ Error creating contract for customer {customer_id} (Tenant: {tenant_id}): {str(api_error)}"
+                        print(msg)
+                        if st:
+                            st.error(msg)
+            except Exception as row_error:
+                # Catch any errors in processing the row itself
+                failed_count += 1
+                failed_customers.append(f"Customer {customer_id}: {str(row_error)}")
+                msg = f"✗ Error processing customer {customer_id}: {str(row_error)}"
+                print(msg)
+                if st:
+                    st.error(msg)
+                # Continue to next customer
+                continue
+        
+        if st:
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Show summary with details
+            st.write("---")
+            st.write(f"**Contract Creation Summary:** {success_count} succeeded, {failed_count} failed")
+            
+            if failed_customers:
+                with st.expander("⚠️ View Failed Contracts"):
+                    for failure in failed_customers:
+                        st.write(f"- {failure}")
         
         # Update contract_id column in the DataFrame for all rows based on customer_id
         if customer_to_contract_id:
@@ -1041,7 +1095,7 @@ def create_contracts(tabs_bt_prepaid_enterprise):
         print(f"Error creating contracts: {str(e)}")
         return tabs_bt_prepaid_enterprise
 
-def create_invoices(tabs_bt_contract):
+def create_invoices(tabs_bt_contract, st=None):
     """
     Push billing terms from tabs_bt_contract to Tabs API using push_bt function.
     Converts DataFrame to CSV format and uploads via bulk-create-billing-schedules endpoint as multipart/form-data.
@@ -1099,6 +1153,9 @@ def create_invoices(tabs_bt_contract):
         csv_file_data = ('billing_schedules.csv', csv_string.encode('utf-8'), 'text/csv')
         
         # Call push_bt API function with CSV file data
+        if st:
+            st.write(f"Pushing {len(result_df)} billing terms to Tabs API...")
+        
         response = push_bt(csv_file_data)
         
         # Handle response
@@ -1130,11 +1187,17 @@ def create_invoices(tabs_bt_contract):
                         # If count doesn't match, just store the first N
                         result_df.loc[:len(billing_term_ids)-1, 'billing_term_id'] = billing_term_ids[:len(result_df)]
                     
-                    print(f"✓ push_bt: Successfully processed {len(billing_term_ids)} billing term(s) in create_invoices")
+                    msg = f"✓ Successfully pushed {len(billing_term_ids)} billing term(s) to Tabs"
+                    print(msg)
+                    if st:
+                        st.success(msg)
                 except Exception as parse_error:
                     result_df['push_status'] = 'SUCCESS'
                     result_df['push_error'] = f"Response parsed but no billingTermIds: {str(parse_error)}"
-                    print(f"⚠ push_bt: API call succeeded but could not parse billingTermIds from response: {str(parse_error)}")
+                    msg = f"⚠ API call succeeded but could not parse billingTermIds: {str(parse_error)}"
+                    print(msg)
+                    if st:
+                        st.warning(msg)
             else:
                 # Failed - extract error message
                 error_msg = f"HTTP {response.status_code}"
@@ -1145,6 +1208,11 @@ def create_invoices(tabs_bt_contract):
                     error_msg = response.text if hasattr(response, 'text') else error_msg
                 
                 result_df['push_status'] = 'FAILED'
+                result_df['push_error'] = error_msg
+                msg = f"✗ Failed to push billing terms: {error_msg}"
+                print(msg)
+                if st:
+                    st.error(msg)
                 result_df['push_error'] = error_msg
                 print(f"✗ push_bt: Failed to push billing terms in create_invoices - {error_msg}")
         else:

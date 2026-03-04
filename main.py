@@ -348,33 +348,63 @@ def main():
             st.write("Create contracts and invoice obligations in Tabs. This step pushes data to the Tabs API.")
             
             if st.button("Create Contracts + Invoices in Tabs", type="primary", key="create_contracts_invoices"):
+                tabs_bt_contract = None
+                invoices_result = None
+                
                 try:
                     tabs_bt_prepaid_enterprise = results['tabs_bt_prepaid_enterprise']
                     billing_run_date = results.get('billing_run_date')
                     
                     # Step 1: Create Contracts
-                    with st.spinner("Creating contracts in Tabs..."):
-                        tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise)
-                        contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
-                        st.success(f"✓ Created {contracts_created} contracts in Tabs")
-                        results['tabs_bt_contract'] = tabs_bt_contract
+                    try:
+                        with st.spinner("Creating contracts in Tabs..."):
+                            tabs_bt_contract = create_contracts(tabs_bt_prepaid_enterprise, st)
+                            contracts_created = tabs_bt_contract['contract_id'].notna().sum() if 'contract_id' in tabs_bt_contract.columns else 0
+                            st.success(f"✓ Contract creation completed: {contracts_created} contracts created")
+                            results['tabs_bt_contract'] = tabs_bt_contract
+                    except Exception as contract_error:
+                        st.error(f"❌ Error during contract creation: {str(contract_error)}")
+                        import traceback
+                        with st.expander("View Error Details"):
+                            st.code(traceback.format_exc())
+                        # Continue to invoices even if contracts failed
+                        if tabs_bt_contract is None:
+                            tabs_bt_contract = tabs_bt_prepaid_enterprise
                     
-                    # Step 2: Create Invoices
-                    with st.spinner("Creating invoices and pushing to Tabs API..."):
-                        invoices_result = create_invoices(tabs_bt_contract)
-                        success_count = (invoices_result['push_status'] == 'SUCCESS').sum() if 'push_status' in invoices_result.columns else 0
-                        st.success(f"✓ Created {success_count} invoices in Tabs")
-                        results['invoices_result'] = invoices_result
+                    # Step 2: Create Invoices (continue even if some contracts failed)
+                    if tabs_bt_contract is not None:
+                        try:
+                            with st.spinner("Creating invoices and pushing to Tabs API..."):
+                                invoices_result = create_invoices(tabs_bt_contract, st)
+                                success_count = (invoices_result['push_status'] == 'SUCCESS').sum() if 'push_status' in invoices_result.columns else 0
+                                st.success(f"✓ Invoice creation completed: {success_count} invoices created")
+                                results['invoices_result'] = invoices_result
+                        except Exception as invoice_error:
+                            st.error(f"❌ Error during invoice creation: {str(invoice_error)}")
+                            import traceback
+                            with st.expander("View Error Details"):
+                                st.code(traceback.format_exc())
+                    else:
+                        st.warning("⚠️ Skipping invoice creation due to contract creation failure")
                     
                     # Update session state
                     st.session_state['processing_results'] = results
-                    st.success("✅ Contracts and Invoices created in Tabs successfully!")
+                    
+                    # Show final status
+                    if tabs_bt_contract is not None and invoices_result is not None:
+                        st.success("✅ Contracts and Invoices process completed!")
+                    elif tabs_bt_contract is not None:
+                        st.warning("⚠️ Contracts created but invoices failed. Check errors above.")
+                    else:
+                        st.error("❌ Both contracts and invoices failed. Check errors above.")
+                    
                     st.rerun()
                     
                 except Exception as e:
-                    st.error(f"Error creating contracts/invoices: {str(e)}")
+                    st.error(f"❌ Unexpected error: {str(e)}")
                     import traceback
-                    st.code(traceback.format_exc())
+                    with st.expander("View Error Details"):
+                        st.code(traceback.format_exc())
     
     # Display CSV outputs if processing was completed
     if st.session_state.get('processing_results'):
