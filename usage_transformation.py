@@ -1780,22 +1780,24 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                         enterprise_pct_decimal = Decimal(str(enterprise_pct))
                         calculated_value = float((sum_product * enterprise_pct_decimal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
                 
-                # Get invoice number from contract mapping
-                contract_name = es_info.get('contract_name', '')
-                invoice_num = contract_to_invoice.get((customer_id, contract_name), 1)
-                
-                # Get event_type_id from stored value
-                event_type_id = es_info.get('event_type_id', '')
-                
-                enterprise_new_rows.append({
-                    'customer_id': customer_id,
-                    'event_type_id': event_type_id,
-                    'event_type_name': sku_name,
-                    'datetime': billing_date,
-                    'value': calculated_value,
-                    'differentiator': '',
-                    'invoice': invoice_num
-                })
+                # Only add row if customer has Enterprise Support percentage
+                if enterprise_pct > 0:
+                    # Get invoice number from contract mapping
+                    contract_name = es_info.get('contract_name', '')
+                    invoice_num = contract_to_invoice.get((customer_id, contract_name), 1)
+                    
+                    # Get event_type_id from stored value
+                    event_type_id = es_info.get('event_type_id', '')
+                    
+                    enterprise_new_rows.append({
+                        'customer_id': customer_id,
+                        'event_type_id': event_type_id,
+                        'event_type_name': sku_name,
+                        'datetime': billing_date,
+                        'value': calculated_value,
+                        'differentiator': '',
+                        'invoice': invoice_num
+                    })
             
             # Append Enterprise Support rows to output_df
             if enterprise_new_rows:
