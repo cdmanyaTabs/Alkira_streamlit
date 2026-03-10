@@ -1523,6 +1523,12 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             is_enterprise_support = 'Enterprise Support' in sku_name or sku_name == 'Enterprise Support'
             is_prepaid = 'Prepaid' in sku_name or sku_name == 'Prepaid'
             
+            # Skip Enterprise Support rows that were added by tabs_billing_terms_to_upload()
+            # These have amount_1='1' and should not be recalculated
+            if is_enterprise_support and str(bt_row.get('amount_1', '')) == '1':
+                # This is an ES row from tabs_billing_terms_to_upload, skip it
+                continue
+            
             if is_enterprise_support:
                 # Store for later processing (needs calculation based on other rows)
                 enterprise_support_rows.append({
