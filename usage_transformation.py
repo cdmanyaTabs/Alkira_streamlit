@@ -380,12 +380,12 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None):
     if 'amount_1' in filtered_df.columns:
         def round_amount(val):
             if pd.isna(val):
-                return ''
+                return '0'  # Return 0 instead of blank for NaN values
             try:
                 # Convert to Decimal, round to 4 places, then to string
                 return str(Decimal(str(val)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP))
             except:
-                return str(val)
+                return '0'  # Return 0 for malformed values
         
         filtered_df['amount_1'] = filtered_df['amount_1'].apply(round_amount)
     

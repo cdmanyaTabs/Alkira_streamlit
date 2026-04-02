@@ -649,41 +649,50 @@ def main():
                         st.code(traceback.format_exc())
         
         with col4:
-            # Button 4: Update Google Sheets
+            # Button 4: Update Prepaid Sheet
             if 'usage_output' in results:
                 usage_df = results['usage_output']
                 if not usage_df.empty:
-                    with st.popover("📊 Update Google Sheets", use_container_width=True):
-                        st.write("**Update Google Sheets Reports**")
-                        st.caption("Reports: [Open Spreadsheet](https://docs.google.com/spreadsheets/d/10Znr32hQQRS1qOcVQIqAtg9PU_6ht5z7WjfXyaL47i4/edit?usp=sharing)")
-                        
-                        if st.button("Update Prepaid Sheet", type="secondary", key="update_prepaid", use_container_width=True):
-                            try:
-                                from google_sheets import update_prepaid_sheet
+                    if st.button("📊 Update Prepaid Sheet", type="primary", key="update_prepaid", use_container_width=True):
+                        try:
+                            from google_sheets import update_prepaid_sheet
+                            
+                            billing_terms_data = results.get('tabs_bt_contract')
+                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
+                            
+                            if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
+                                st.error("No billing terms data available")
+                            else:
+                                prepaid_data = generate_prepaid_report_data(usage_df, billing_terms_data)
                                 
-                                billing_terms_data = results.get('tabs_bt_contract')
-                                if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
-                                    billing_terms_data = results.get('tabs_bt_prepaid_enterprise')
-                                
-                                if billing_terms_data is None or (hasattr(billing_terms_data, 'empty') and billing_terms_data.empty):
-                                    st.error("No billing terms data available")
-                                else:
-                                    prepaid_data = generate_prepaid_report_data(usage_df, billing_terms_data)
+                                if prepaid_data:
+                                    with st.spinner("Updating Prepaid Sheet..."):
+                                        result = update_prepaid_sheet(prepaid_data)
                                     
-                                    if prepaid_data:
-                                        with st.spinner("Updating Prepaid Sheet..."):
-                                            result = update_prepaid_sheet(prepaid_data)
-                                        
-                                        if result.get('success'):
-                                            st.success(result.get('message'))
-                                        else:
-                                            st.error(result.get('message'))
+                                    if result.get('success'):
+                                        st.success(result.get('message'))
                                     else:
-                                        st.warning("No prepaid data found to update")
-                            except ImportError:
-                                st.error("Google Sheets integration not configured.")
-                            except Exception as e:
-                                st.error(f"Error: {str(e)}")
+                                        st.error(result.get('message'))
+                                else:
+                                    st.warning("No prepaid data found to update")
+                        except ImportError:
+                            st.error("Google Sheets integration not configured.")
+                        except Exception as e:
+                            st.error(f"Error: {str(e)}")
+        
+        # Additional Google Sheets Actions
+        st.write("")  # Add spacing
+        col5, col6 = st.columns(2)
+        
+        with col5:
+            # Update Commit Consumption Sheet (kept in popover for less common use)
+            if 'usage_output' in results:
+                usage_df = results['usage_output']
+                if not usage_df.empty:
+                    with st.popover("📈 Update Commit Consumption", use_container_width=True):
+                        st.write("**Update Commit Consumption Sheet**")
+                        st.caption("Reports: [Open Spreadsheet](https://docs.google.com/spreadsheets/d/10Znr32hQQRS1qOcVQIqAtg9PU_6ht5z7WjfXyaL47i4/edit?usp=sharing)")
                         
                         if st.button("Update Commit Consumption Sheet", type="secondary", key="update_consumption", use_container_width=True):
                             try:
