@@ -167,7 +167,7 @@ def main():
             )
             if needs_reprocess:
                 with st.spinner("Extracting customer IDs from ZIP file..."):
-                    customer_files = price_book_transformation(price_book_file, billing_run_date)
+                    customer_files = price_book_transformation(price_book_file, billing_run_date, st)
                     st.session_state['price_book_data'] = customer_files
                     st.session_state['price_book_file_name'] = price_book_file.name
                     st.session_state['last_billing_run_date_used'] = billing_run_date
@@ -251,7 +251,7 @@ def main():
             try:
                 # Step 1: Process Price Book ZIP
                 with st.spinner("Step 1/5: Processing Price Book ZIP file..."):
-                    customer_files = price_book_transformation(price_book_file, billing_run_date)
+                    customer_files = price_book_transformation(price_book_file, billing_run_date, st)
                     
                     if 'errors' in customer_files and customer_files['errors']:
                         errors.extend(customer_files['errors'])
@@ -278,7 +278,7 @@ def main():
                         tabs_bt_enterprise = tabs_bt_clean_df
                         if enterprise_support_file:
                             with st.spinner("Step 3/5: Adding Enterprise Support rows..."):
-                                tabs_bt_enterprise = enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_date)
+                                tabs_bt_enterprise = enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_date, st)
                                 st.success(f"✓ Step 3: Added Enterprise Support rows ({len(tabs_bt_enterprise)} rows)")
                         else:
                             st.info("Step 3: Skipped (Enterprise Support file not uploaded)")
@@ -287,7 +287,7 @@ def main():
                         tabs_bt_prepaid_enterprise = tabs_bt_enterprise
                         if prepaid_file:
                             with st.spinner("Step 4/5: Adding Prepaid rows..."):
-                                tabs_bt_prepaid_enterprise = prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date)
+                                tabs_bt_prepaid_enterprise = prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date, st)
                                 st.success(f"✓ Step 4: Added Prepaid rows ({len(tabs_bt_prepaid_enterprise)} rows)")
                         else:
                             st.info("Step 4: Skipped (Prepaid file not uploaded)")
@@ -339,6 +339,14 @@ def main():
                                         filtered_bt = tabs_bt_prepaid_enterprise[
                                             tabs_bt_prepaid_enterprise.apply(should_keep_row, axis=1)
                                         ].copy()
+                                        
+                                        # #region agent log
+                                        dup_check = filtered_bt.groupby(['customer_id', 'name']).size()
+                                        dups = dup_check[dup_check > 1]
+                                        st.write(f"🔍 DEBUG: After filtering billing terms - filtered rows: {len(filtered_bt)}, duplicates: {len(dups)}")
+                                        if len(dups) > 0:
+                                            st.write(f"Sample duplicates (first 10): {dups.head(10).to_dict()}")
+                                        # #endregion
                                         
                                         removed_count = len(tabs_bt_prepaid_enterprise) - len(filtered_bt)
                                         st.success(f"✓ Filtered billing terms: keeping {len(filtered_bt)} rows (removed {removed_count} rows without usage)")

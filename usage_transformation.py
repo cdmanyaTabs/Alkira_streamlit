@@ -37,7 +37,7 @@ def normalize_contract_name(contract_name):
     
     return normalized
 
-def price_book_transformation(zip_file, billing_run_date=None):
+def price_book_transformation(zip_file, billing_run_date=None, st=None):
     """
     Extract ZIP file and parse tenant IDs from filenames.
     Supports ZIP files containing either CSV files or XLSX/XLS files (or both).
@@ -332,7 +332,7 @@ def price_book_transformation(zip_file, billing_run_date=None):
                 customer_files['combined'] = combined_df
                 
                 # Create filtered DataFrame using tabs_billing_terms_format function
-                customer_files['filtered'] = tabs_billing_terms_format(combined_df, billing_run_date)
+                customer_files['filtered'] = tabs_billing_terms_format(combined_df, billing_run_date, st)
                 
             except Exception as e:
                 print(f"Error fetching customers from API: {str(e)}")
@@ -341,7 +341,7 @@ def price_book_transformation(zip_file, billing_run_date=None):
                 customer_files['combined'] = combined_df
                 
                 # Create filtered DataFrame even if API calls failed
-                customer_files['filtered'] = tabs_billing_terms_format(combined_df, billing_run_date)
+                customer_files['filtered'] = tabs_billing_terms_format(combined_df, billing_run_date, st)
         
     except Exception as e:
         error_msg = f"Error processing zip file: {str(e)}"
@@ -353,7 +353,7 @@ def price_book_transformation(zip_file, billing_run_date=None):
     customer_files['errors'] = errors
     return customer_files
 
-def tabs_billing_terms_format(combined_df, billing_run_date=None):
+def tabs_billing_terms_format(combined_df, billing_run_date=None, st=None):
     """
     Create a filtered DataFrame with only the columns needed for Tabs billing terms.
     
@@ -369,12 +369,41 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None):
     available_columns = [col for col in filtered_columns if col in combined_df.columns]
     filtered_df = combined_df[available_columns].copy()
     
+    # #region agent log
+    if st:
+        duplicate_check = filtered_df.groupby(['Tabs Customer ID', 'SKU Name']).size()
+        duplicates = duplicate_check[duplicate_check > 1]
+        st.write(f"🔍 DEBUG: After filtering price book - Total rows: {len(filtered_df)}, Duplicate groups: {len(duplicates)}")
+        if len(duplicates) > 0:
+            st.write(f"Sample duplicates (first 5): {duplicates.head(5).to_dict()}")
+            # Check if duplicates have different contract names
+            sample_dup_key = list(duplicates.head(1).index)[0]
+            sample_rows = filtered_df[(filtered_df['Tabs Customer ID'] == sample_dup_key[0]) & (filtered_df['SKU Name'] == sample_dup_key[1])]
+            st.write(f"🔍 Sample duplicate rows for {sample_dup_key}:")
+            st.write(f"  Contracts: {sample_rows['contract_name'].tolist()}")
+            st.write(f"  NET RATEs: {sample_rows['NET RATE'].tolist()}")
+    # #endregion
+    
     # Rename columns
     filtered_df = filtered_df.rename(columns={
         'Tabs Customer ID': 'customer_id',
         'SKU Name': 'name',
         'NET RATE': 'amount_1'
     })
+    
+    # #region agent log
+    if st:
+        st.write(f"🔧 DEBUG: Before deduplication - Total rows: {len(filtered_df)}")
+    # #endregion
+    
+    # Deduplicate based on (customer_id, name, contract_name)
+    # Keep the first occurrence of each duplicate
+    filtered_df = filtered_df.drop_duplicates(subset=['customer_id', 'name', 'contract_name'], keep='first')
+    
+    # #region agent log
+    if st:
+        st.write(f"✅ DEBUG: After deduplication - Total rows: {len(filtered_df)}")
+    # #endregion
     
     # Round amount_1 to 4 decimal places and convert to string
     if 'amount_1' in filtered_df.columns:
@@ -466,6 +495,15 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None):
     # Add any remaining columns that weren't in the order list (like class_id)
     remaining_columns = [col for col in filtered_df.columns if col not in column_order]
     filtered_df = filtered_df[existing_columns + remaining_columns]
+    
+    # #region agent log
+    if st:
+        duplicate_check = filtered_df.groupby(['customer_id', 'name']).size()
+        duplicates = duplicate_check[duplicate_check > 1]
+        st.write(f"🔍 DEBUG: Before returning from price_book_transformation - Total rows: {len(filtered_df)}, Duplicate groups: {len(duplicates)}")
+        if len(duplicates) > 0:
+            st.write(f"Sample duplicates (first 10): {duplicates.head(10).to_dict()}")
+    # #endregion
     
     return filtered_df
 
@@ -624,7 +662,7 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file, st=None):
         return filtered_df
 
 
-def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_date=None):
+def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_date=None, st=None):
     """
     Process enterprise support file and add additional rows to tabs_bt_clean_df.
     
@@ -705,6 +743,18 @@ def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_da
         # Create new rows for each Tenant ID from enterprise support file
         new_rows = []
         for tenant_id_from_file, tabs_customer_id in tenant_to_customer_id.items():
+            # Check if this customer already has an Enterprise Support row in tabs_bt_clean_df
+            existing_es = tabs_bt_clean_df_copy[
+                (tabs_bt_clean_df_copy['customer_id'] == tabs_customer_id) &
+                (tabs_bt_clean_df_copy['name'].str.contains('Enterprise Support', case=False, na=False))
+            ]
+            
+            if not existing_es.empty:
+                # Customer already has Enterprise Support from price book, skip adding duplicate
+                if st:
+                    st.write(f"⚠️ DEBUG: Skipping duplicate ES for customer {tabs_customer_id} (already in price book)")
+                continue
+            
             # Get the first row with this customer_id to copy some values
             matching_row = tabs_bt_clean_df_copy[tabs_bt_clean_df_copy['customer_id'] == tabs_customer_id].iloc[0]
             
@@ -768,7 +818,21 @@ def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_da
                 new_rows_df = new_rows_df[existing_columns + remaining_columns]
             
             # Append new rows to tabs_bt_clean_df
+            # #region agent log
+            if st:
+                dup_before = tabs_bt_clean_df.groupby(['customer_id', 'name']).size()
+                dups_before = dup_before[dup_before > 1]
+                st.write(f"🔍 DEBUG: Before concat ES rows - tabs_bt_clean_df: {len(tabs_bt_clean_df)} rows, new ES rows: {len(new_rows_df)}, duplicates before: {len(dups_before)}")
+            # #endregion
             tabs_bt_enterprise = pd.concat([tabs_bt_clean_df, new_rows_df], ignore_index=True)
+            # #region agent log
+            if st:
+                dup_after = tabs_bt_enterprise.groupby(['customer_id', 'name']).size()
+                dups_after = dup_after[dup_after > 1]
+                st.write(f"🔍 DEBUG: After concat ES rows - tabs_bt_enterprise: {len(tabs_bt_enterprise)} rows, duplicates after: {len(dups_after)}")
+                if len(dups_after) > 0:
+                    st.write(f"Sample duplicates (first 10): {dups_after.head(10).to_dict()}")
+            # #endregion
             return tabs_bt_enterprise
         
         return tabs_bt_clean_df
@@ -778,7 +842,7 @@ def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_da
         return tabs_bt_clean_df
 
 
-def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None):
+def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None, st=None):
     """
     Process prepaid file and add additional rows to tabs_bt_enterprise.
     
@@ -944,7 +1008,21 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None):
                 new_rows_df = new_rows_df[existing_columns + remaining_columns]
             
             # Append new rows to tabs_bt_enterprise
+            # #region agent log
+            if st:
+                dup_before = tabs_bt_enterprise.groupby(['customer_id', 'name']).size()
+                dups_before = dup_before[dup_before > 1]
+                st.write(f"🔍 DEBUG: Before concat Prepaid rows - tabs_bt_enterprise: {len(tabs_bt_enterprise)} rows, new Prepaid rows: {len(new_rows_df)}, duplicates before: {len(dups_before)}")
+            # #endregion
             tabs_bt_prepaid_enterprise = pd.concat([tabs_bt_enterprise, new_rows_df], ignore_index=True)
+            # #region agent log
+            if st:
+                dup_after = tabs_bt_prepaid_enterprise.groupby(['customer_id', 'name']).size()
+                dups_after = dup_after[dup_after > 1]
+                st.write(f"🔍 DEBUG: After concat Prepaid rows - tabs_bt_prepaid_enterprise: {len(tabs_bt_prepaid_enterprise)} rows, duplicates after: {len(dups_after)}")
+                if len(dups_after) > 0:
+                    st.write(f"Sample duplicates (first 10): {dups_after.head(10).to_dict()}")
+            # #endregion
             return tabs_bt_prepaid_enterprise
         
         return tabs_bt_enterprise
