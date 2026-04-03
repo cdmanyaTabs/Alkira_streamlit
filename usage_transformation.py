@@ -454,7 +454,7 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None, st=None):
     else:
         filtered_df['revenue_end_date'] = billing_run_date
     filtered_df['invoice_type'] = 'INVOICE'  
-    filtered_df['class_id'] = ''
+    filtered_df['classId'] = ''
     filtered_df['revenue_product_id'] = ''
     filtered_df['value_1'] = ''
     filtered_df['amount_2'] = ''
@@ -487,7 +487,7 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None, st=None):
         'value_1',
         'amount_2',
         'value_2',
-        'class_id'
+        'classId'
     ]
     
     # Only include columns that exist in the DataFrame
@@ -796,7 +796,7 @@ def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_da
                 'value_1': '',
                 'amount_2': '',
                 'value_2': '',
-                'class_id': ''
+                'classId': ''
             }
             
             # Add any additional columns that might exist in tabs_bt_clean_df
@@ -986,7 +986,7 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None, st=None):
                 'value_1': '',
                 'amount_2': '',
                 'value_2': '',
-                'class_id': ''
+                'classId': ''
             }
             
             # Add any additional columns that might exist in tabs_bt_enterprise
