@@ -313,16 +313,38 @@ def price_book_transformation(zip_file, billing_run_date=None, st=None):
                             if item_name and item_id:
                                 item_name_to_id[item_name] = item_id
                     
+                    # Collect all unmatched SKU names across all DataFrames
+                    all_unmatched_items = set()
+                    
                     # Update integration_item_id in all DataFrames
                     for df in all_dataframes:
                         if 'SKU Name' in df.columns:
                             df['integration_item_id'] = df['SKU Name'].map(item_name_to_id)
                             
-                            # Check for unmatched SKU Names
+                            # Collect unmatched SKU Names
                             unmatched_items = df[df['integration_item_id'].isna() & df['SKU Name'].notna()]['SKU Name'].unique()
-                            if len(unmatched_items) > 0:
-                                print(f"Warning: No matching integration item ID found for SKU Name(s): {', '.join(unmatched_items[:10])}" + 
-                                      (f" (and {len(unmatched_items) - 10} more)" if len(unmatched_items) > 10 else ""))
+                            all_unmatched_items.update(unmatched_items)
+                    
+                    # Display all unmatched items once after processing all dataframes
+                    if len(all_unmatched_items) > 0:
+                        unmatched_list = sorted(list(all_unmatched_items))
+                        warning_msg = f"Warning: {len(unmatched_list)} SKU name(s) could not be mapped to integration items:\n"
+                        
+                        # Show first 20 items
+                        display_count = min(20, len(unmatched_list))
+                        for i in range(display_count):
+                            warning_msg += f"- {unmatched_list[i]}\n"
+                        
+                        if len(unmatched_list) > 20:
+                            warning_msg += f"(and {len(unmatched_list) - 20} more)\n"
+                        
+                        warning_msg += "\nThese SKUs will be created without integration item IDs."
+                        
+                        # Display in UI if available, otherwise print to console
+                        if st:
+                            st.warning(warning_msg)
+                        else:
+                            print(warning_msg)
                     
                 except Exception as e:
                     print(f"Error fetching integration items from API: {str(e)}")
