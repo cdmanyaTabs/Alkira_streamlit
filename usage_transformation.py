@@ -7,6 +7,11 @@ import math
 import pandas as pd
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+
+# Quantize each meter×price line to cents before summing (matches common invoice line rounding).
+# If usage rows split differently than Tabs invoice lines, the Prepaid CSV total can still differ
+# by a cent from the invoice header total.
+_CENTS = Decimal('0.01')
 from api import get_all_customers, get_event_ids, get_integration_items, create_contract, push_bt
 
 def normalize_contract_name(contract_name):
@@ -762,6 +767,20 @@ def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_da
             except (ValueError, AttributeError):
                 revenue_end_date = billing_run_date
         
+        # Look up "Enterprise Support" integration item ID from Tabs API
+        enterprise_support_item_id = ''
+        try:
+            items_df = get_integration_items()
+            if not items_df.empty and 'name' in items_df.columns and 'id' in items_df.columns:
+                match = items_df[items_df['name'] == 'Enterprise Support']
+                if not match.empty:
+                    enterprise_support_item_id = match.iloc[0]['id']
+                elif st:
+                    st.warning("No 'Enterprise Support' integration item found in Tabs")
+        except Exception as e:
+            if st:
+                st.warning(f"Error fetching integration items for Enterprise Support: {str(e)}")
+        
         # Create new rows for each Tenant ID from enterprise support file
         new_rows = []
         for tenant_id_from_file, tabs_customer_id in tenant_to_customer_id.items():
@@ -809,7 +828,7 @@ def enterprise_support(tabs_bt_clean_df, enterprise_support_file, billing_run_da
                 'event_to_track': 'a12f94a4-6634-4e98-9587-7700b42808ed',
                 'name': 'Enterprise Support',
                 'note': '',
-                'integration_item_id': '',
+                'integration_item_id': enterprise_support_item_id,
                 'revenue_start_date': billing_run_date,
                 'revenue_end_date': revenue_end_date,
                 'invoice_type': 'INVOICE',
@@ -949,6 +968,20 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None, st=None):
             except (ValueError, AttributeError):
                 revenue_end_date = billing_run_date
         
+        # Look up "Prepaid" integration item ID from Tabs API
+        prepaid_item_id = ''
+        try:
+            items_df = get_integration_items()
+            if not items_df.empty and 'name' in items_df.columns and 'id' in items_df.columns:
+                match = items_df[items_df['name'] == 'Prepaid']
+                if not match.empty:
+                    prepaid_item_id = match.iloc[0]['id']
+                elif st:
+                    st.warning("No 'Prepaid' integration item found in Tabs")
+        except Exception as e:
+            if st:
+                st.warning(f"Error fetching integration items for Prepaid: {str(e)}")
+        
         # Create new rows for each Tenant ID from prepaid file
         new_rows = []
         for tenant_id_from_file, tabs_customer_id in tenant_to_customer_id.items():
@@ -997,9 +1030,9 @@ def prepaid(tabs_bt_enterprise, prepaid_file, billing_run_date=None, st=None):
                 'billing_type': 'UNIT_PRICE',
                 'invoiceDateStrategy': 'ARREARS',
                 'event_to_track': prepaid_event_type_id,  # Use the fetched ID instead of hardcoded
-                'name': 'Prepaid',  
+                'name': 'Prepaid',
                 'note': '',
-                'integration_item_id': '',
+                'integration_item_id': prepaid_item_id,
                 'revenue_start_date': billing_run_date,
                 'revenue_end_date': revenue_end_date,
                 'invoice_type': 'INVOICE',
@@ -1623,12 +1656,8 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
             is_enterprise_support = 'Enterprise Support' in sku_name or sku_name == 'Enterprise Support'
             is_prepaid = 'Prepaid' in sku_name or sku_name == 'Prepaid'
             
-            # Skip Enterprise Support rows that were added by tabs_billing_terms_to_upload()
-            # These have amount_1='1' and should not be recalculated
-            if is_enterprise_support and str(bt_row.get('amount_1', '')) == '1':
-                # This is an ES row from tabs_billing_terms_to_upload, skip it
-                continue
-            
+            # Enterprise Support billing terms may use amount_1='1' as the usage unit rate; usage CSV
+            # still computes value as ES% * sum(meter * amount_1) over other SKUs for this customer.
             if is_enterprise_support:
                 # Store for later processing (needs calculation based on other rows)
                 enterprise_support_rows.append({
@@ -1873,12 +1902,14 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                                 except:
                                     amount_1_decimal = Decimal('0')
                                 
-                                # Calculate value * amount_1 using Decimal
-                                sum_product += value_decimal * amount_1_decimal
+                                line_total = (value_decimal * amount_1_decimal).quantize(
+                                    _CENTS, rounding=ROUND_HALF_UP
+                                )
+                                sum_product += line_total
                         
                         # Multiply sum by Enterprise Support % and round with ROUND_HALF_UP
                         enterprise_pct_decimal = Decimal(str(enterprise_pct))
-                        calculated_value = float((sum_product * enterprise_pct_decimal).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+                        calculated_value = float((sum_product * enterprise_pct_decimal).quantize(_CENTS, rounding=ROUND_HALF_UP))
                 
                 # Only add row if customer has Enterprise Support percentage
                 if enterprise_pct > 0:
@@ -1915,7 +1946,7 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                 customer_id = prepaid_info['customer_id']
                 sku_name = prepaid_info['name']
                 
-                # Calculate value using formula: sum(value * amount_1) for all customer rows (including Enterprise Support)
+                # Prepaid: round each (value * amount_1) to cents, then sum (aligns with per-line invoice rounding).
                 calculated_value = 0
                 
                 # Find all rows in output_df with this customer_id (INCLUDING Enterprise Support rows)
@@ -1951,11 +1982,12 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                             except:
                                 amount_1_decimal = Decimal('0')
                             
-                            # Calculate value * amount_1 using Decimal
-                            sum_product += value_decimal * amount_1_decimal
+                            line_total = (value_decimal * amount_1_decimal).quantize(
+                                _CENTS, rounding=ROUND_HALF_UP
+                            )
+                            sum_product += line_total
                     
-                    # Set calculated value with ROUND_HALF_UP to 2 decimal places
-                    calculated_value = float(sum_product.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+                    calculated_value = float(sum_product.quantize(_CENTS, rounding=ROUND_HALF_UP))
                 
                 # Get invoice number from contract mapping
                 contract_name = prepaid_info.get('contract_name', '')

@@ -4,6 +4,7 @@ import requests
 import io
 import json
 import uuid
+from decimal import Decimal, ROUND_HALF_UP
 
 def get_customer_custom_field():
     url = f"https://integrators.prod.api.tabsplatform.com/v3/customers/custom-fields"
@@ -188,10 +189,16 @@ def get_invoices(customer_id: str, contract_id: str) -> dict:
             response_data = response.json()
             invoices = response_data.get("payload", {}).get("data", [])
             
-            # Calculate total from all invoices
-            total_amount = 0
+            # Sum invoice totals in Decimal; quantize to cents to avoid float drift (Apply Prepaid).
+            cents = Decimal('0.01')
+            total_decimal = Decimal('0')
             for invoice in invoices:
-                total_amount += float(invoice.get("total", 0))
+                raw = invoice.get('total', 0)
+                try:
+                    total_decimal += Decimal(str(raw))
+                except Exception:
+                    total_decimal += Decimal('0')
+            total_amount = float(total_decimal.quantize(cents, rounding=ROUND_HALF_UP))
             
             return {
                 "success": True,

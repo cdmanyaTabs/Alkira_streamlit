@@ -22,6 +22,9 @@ from usage_transformation import (
     generate_commit_consumption_data
 )
 
+# Set True to show "Push Usage Events to Tabs" in Actions (hidden by default).
+SHOW_PUSH_USAGE_EVENTS_TO_TABS = False
+
 # Page configuration
 st.set_page_config(
     page_title="Alkira Usage Transformation App",
@@ -368,6 +371,18 @@ def main():
                                 for error in errors:
                                     st.error(error)
                         
+                        # Display billing terms missing integration_item_id
+                        final_bt = results.get('tabs_bt_prepaid_enterprise')
+                        if final_bt is not None and not final_bt.empty and 'integration_item_id' in final_bt.columns:
+                            missing_mask = final_bt['integration_item_id'].isna() | (final_bt['integration_item_id'].astype(str).str.strip() == '')
+                            missing_items_df = final_bt[missing_mask]
+                            if not missing_items_df.empty:
+                                st.warning(f"{len(missing_items_df)} billing term(s) in the CSV have no integration item mapped")
+                                with st.expander("View billing terms missing integration items", expanded=False):
+                                    display_cols = [c for c in ['customer_id', 'tenant_id', 'contract_id', 'name', 'amount_1']
+                                                    if c in missing_items_df.columns]
+                                    st.dataframe(missing_items_df[display_cols], use_container_width=True)
+                        
                         # Display success message
                         st.success("✅ Processing completed successfully!")
             
@@ -447,93 +462,94 @@ def main():
                             st.code(traceback.format_exc())
         
         with col2:
-            # Button 2: Push Usage Events
-            if 'usage_output' in results:
-                usage_df = results['usage_output']
-                if not usage_df.empty:
-                    if st.button("📊 Push Usage Events to Tabs", type="primary", key="push_usage", use_container_width=True):
-                        try:
-                            from api import create_usage_events_bulk
-                            
-                            # Exclude Prepaid rows from usage events push
-                            filtered_usage = usage_df[~usage_df['event_type_name'].str.contains('Prepaid', case=False, na=False)]
-                            
-                            # Convert filtered usage to list of event dictionaries
-                            events_list = []
-                            for _, row in filtered_usage.iterrows():
-                                # invoice column already contains the correct format (blank, 1, 2, 3...)
-                                # Just use it directly as invoice_split_key
-                                invoice_split_key = str(row.get('invoice', ''))
+            if SHOW_PUSH_USAGE_EVENTS_TO_TABS:
+                # Button 2: Push Usage Events
+                if 'usage_output' in results:
+                    usage_df = results['usage_output']
+                    if not usage_df.empty:
+                        if st.button("📊 Push Usage Events to Tabs", type="primary", key="push_usage", use_container_width=True):
+                            try:
+                                from api import create_usage_events_bulk
                                 
-                                event = {
-                                    'customer_id': str(row.get('customer_id', '')),
-                                    'event_type_id': str(row.get('event_type_id', '')),
-                                    'datetime': str(row.get('datetime', '')),
-                                    'value': float(row.get('value', 0)) if pd.notna(row.get('value')) else 0,
-                                    'differentiator': str(row.get('differentiator', '')),
-                                    'invoice_split_key': invoice_split_key
-                                }
-                                events_list.append(event)
-                            
-                            if events_list:
-                                with st.spinner(f"Pushing {len(events_list)} usage events to Tabs..."):
-                                    result = create_usage_events_bulk(events_list)
+                                # Exclude Prepaid rows from usage events push
+                                filtered_usage = usage_df[~usage_df['event_type_name'].str.contains('Prepaid', case=False, na=False)]
                                 
-                                # Check success/failure counts from bulk response
-                                success_count = result.get('success_count', 0)
-                                failure_count = result.get('failure_count', 0)
-                                total = result.get('total', 0)
-                                
-                                if failure_count == 0:
-                                    st.success(f"✅ Successfully pushed {success_count}/{total} usage events to Tabs")
+                                # Convert filtered usage to list of event dictionaries
+                                events_list = []
+                                for _, row in filtered_usage.iterrows():
+                                    # invoice column already contains the correct format (blank, 1, 2, 3...)
+                                    # Just use it directly as invoice_split_key
+                                    invoice_split_key = str(row.get('invoice', ''))
                                     
-                                    # Mark all unique contracts as processed (excluding Prepaid)
-                                    try:
-                                        from api import mark_contract_processed
-                                        tabs_bt_contract = results.get('tabs_bt_contract')
+                                    event = {
+                                        'customer_id': str(row.get('customer_id', '')),
+                                        'event_type_id': str(row.get('event_type_id', '')),
+                                        'datetime': str(row.get('datetime', '')),
+                                        'value': float(row.get('value', 0)) if pd.notna(row.get('value')) else 0,
+                                        'differentiator': str(row.get('differentiator', '')),
+                                        'invoice_split_key': invoice_split_key
+                                    }
+                                    events_list.append(event)
+                                
+                                if events_list:
+                                    with st.spinner(f"Pushing {len(events_list)} usage events to Tabs..."):
+                                        result = create_usage_events_bulk(events_list)
+                                    
+                                    # Check success/failure counts from bulk response
+                                    success_count = result.get('success_count', 0)
+                                    failure_count = result.get('failure_count', 0)
+                                    total = result.get('total', 0)
+                                    
+                                    if failure_count == 0:
+                                        st.success(f"✅ Successfully pushed {success_count}/{total} usage events to Tabs")
                                         
-                                        if tabs_bt_contract is not None and not tabs_bt_contract.empty:
-                                            # Filter out Prepaid rows
-                                            non_prepaid_bt = tabs_bt_contract[~tabs_bt_contract['name'].str.contains('Prepaid', case=False, na=False)]
-                                            unique_contracts = non_prepaid_bt['contract_id'].dropna().unique()
+                                        # Mark all unique contracts as processed (excluding Prepaid)
+                                        try:
+                                            from api import mark_contract_processed
+                                            tabs_bt_contract = results.get('tabs_bt_contract')
                                             
-                                            mark_success = 0
-                                            mark_fail = 0
+                                            if tabs_bt_contract is not None and not tabs_bt_contract.empty:
+                                                # Filter out Prepaid rows
+                                                non_prepaid_bt = tabs_bt_contract[~tabs_bt_contract['name'].str.contains('Prepaid', case=False, na=False)]
+                                                unique_contracts = non_prepaid_bt['contract_id'].dropna().unique()
+                                                
+                                                mark_success = 0
+                                                mark_fail = 0
+                                                
+                                                with st.spinner(f"Marking {len(unique_contracts)} contract(s) as processed..."):
+                                                    for contract_id in unique_contracts:
+                                                        if contract_id and str(contract_id) != 'nan' and str(contract_id) != '':
+                                                            result = mark_contract_processed(str(contract_id))
+                                                            if result.get('success'):
+                                                                mark_success += 1
+                                                            else:
+                                                                mark_fail += 1
+                                                
+                                                if mark_fail == 0:
+                                                    st.success(f"✅ Marked {mark_success} contract(s) as processed")
+                                                else:
+                                                    st.warning(f"⚠️ Marked {mark_success} contract(s). {mark_fail} failed.")
+                                        except Exception as mark_error:
+                                            st.warning(f"⚠️ Usage events pushed but failed to mark contracts: {str(mark_error)}")
                                             
-                                            with st.spinner(f"Marking {len(unique_contracts)} contract(s) as processed..."):
-                                                for contract_id in unique_contracts:
-                                                    if contract_id and str(contract_id) != 'nan' and str(contract_id) != '':
-                                                        result = mark_contract_processed(str(contract_id))
-                                                        if result.get('success'):
-                                                            mark_success += 1
-                                                        else:
-                                                            mark_fail += 1
-                                            
-                                            if mark_fail == 0:
-                                                st.success(f"✅ Marked {mark_success} contract(s) as processed")
-                                            else:
-                                                st.warning(f"⚠️ Marked {mark_success} contract(s). {mark_fail} failed.")
-                                    except Exception as mark_error:
-                                        st.warning(f"⚠️ Usage events pushed but failed to mark contracts: {str(mark_error)}")
-                                        
-                                elif success_count > 0:
-                                    st.warning(f"⚠️ Pushed {success_count}/{total} events. {failure_count} failed.")
-                                    if result.get('failures'):
-                                        with st.expander("View Errors"):
-                                            for failure in result.get('failures', []):
-                                                st.error(f"Event {failure.get('index')}: {failure.get('error')}")
+                                    elif success_count > 0:
+                                        st.warning(f"⚠️ Pushed {success_count}/{total} events. {failure_count} failed.")
+                                        if result.get('failures'):
+                                            with st.expander("View Errors"):
+                                                for failure in result.get('failures', []):
+                                                    st.error(f"Event {failure.get('index')}: {failure.get('error')}")
+                                    else:
+                                        st.error(f"❌ Failed to push events. {failure_count}/{total} failed.")
+                                        if result.get('failures'):
+                                            with st.expander("View Errors"):
+                                                for failure in result.get('failures', []):
+                                                    st.error(f"Event {failure.get('index')}: {failure.get('error')}")
                                 else:
-                                    st.error(f"❌ Failed to push events. {failure_count}/{total} failed.")
-                                    if result.get('failures'):
-                                        with st.expander("View Errors"):
-                                            for failure in result.get('failures', []):
-                                                st.error(f"Event {failure.get('index')}: {failure.get('error')}")
-                            else:
-                                st.warning("No usage events to push")
-                        except Exception as e:
-                            st.error(f"Error pushing usage events: {str(e)}")
-                            import traceback
-                            st.code(traceback.format_exc())
+                                    st.warning("No usage events to push")
+                            except Exception as e:
+                                st.error(f"Error pushing usage events: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
         
         # Second row of buttons
         col3, col4 = st.columns(2)
