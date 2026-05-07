@@ -42,6 +42,44 @@ def normalize_contract_name(contract_name):
     
     return normalized
 
+
+def build_tenant_to_customer_id_map():
+    """
+    Map Tabs Tenant ID (or Account #, including multi-tenant 'A + B') -> Tabs customer UUID.
+    Same logic as used when mapping raw usage to customers.
+    """
+    customers_data = get_all_customers()
+    tenant_to_customer_id = {}
+    for customer in customers_data:
+        tabs_customer_id = customer.get('id')
+        custom_fields = customer.get('customFields', [])
+
+        tenant_id_value = None
+        for field in custom_fields:
+            field_name = field.get('customFieldName')
+            if field_name == 'Tenant ID':
+                tenant_id_value = field.get('customFieldValue')
+                if tenant_id_value:
+                    tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
+                    break
+
+        if not tenant_id_value:
+            for field in custom_fields:
+                if field.get('customFieldName') == 'Account #':
+                    account_value = field.get('customFieldValue')
+                    if account_value:
+                        if '+' in str(account_value):
+                            for part in str(account_value).split('+'):
+                                part = part.strip()
+                                if part:
+                                    tenant_to_customer_id[part] = tabs_customer_id
+                        else:
+                            tenant_to_customer_id[str(account_value)] = tabs_customer_id
+                        break
+
+    return tenant_to_customer_id
+
+
 def price_book_transformation(zip_file, billing_run_date=None, st=None):
     """
     Extract ZIP file and parse tenant IDs from filenames.
@@ -225,39 +263,7 @@ def price_book_transformation(zip_file, billing_run_date=None, st=None):
         # Get all customers from API to map tenant_id to Tabs Customer ID
         if all_dataframes:
             try:
-                customers_data = get_all_customers()
-                
-                # Create mapping dictionary: tenant_id -> tabs_customer_id
-                tenant_to_customer_id = {}
-                for customer in customers_data:
-                    tabs_customer_id = customer.get('id')
-                    custom_fields = customer.get('customFields', [])
-                    
-                    # Find the Tenant ID custom field, fallback to Account # if not found
-                    tenant_id_value = None
-                    for field in custom_fields:
-                        field_name = field.get('customFieldName')
-                        if field_name == 'Tenant ID':
-                            tenant_id_value = field.get('customFieldValue')
-                            if tenant_id_value:
-                                tenant_to_customer_id[tenant_id_value] = tabs_customer_id
-                                break
-                    
-                    # If Tenant ID not found, try Account #
-                    if not tenant_id_value:
-                        for field in custom_fields:
-                            if field.get('customFieldName') == 'Account #':
-                                account_value = field.get('customFieldValue')
-                                if account_value:
-                                    # Handle multiple tenant IDs separated by + (e.g., "123 + 456")
-                                    if '+' in str(account_value):
-                                        for part in str(account_value).split('+'):
-                                            part = part.strip()
-                                            if part:
-                                                tenant_to_customer_id[part] = tabs_customer_id
-                                    else:
-                                        tenant_to_customer_id[str(account_value)] = tabs_customer_id
-                                    break
+                tenant_to_customer_id = build_tenant_to_customer_id_map()
                 
                 # Collect all unique tenant_ids from the files
                 file_tenant_ids = set()
@@ -538,8 +544,10 @@ def tabs_billing_terms_format(combined_df, billing_run_date=None, st=None):
 def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file, st=None):
     """
     Compare the filtered_df with the Raw Monthly Usage file.
-    Filter filtered_df to only include rows where tenant_id, name, and contract_name match
-    the Tenant ID, SKU Name, and Contract from the raw monthly usage file.
+    Keep a billing row if either:
+    - (tenant_id, SKU, contract) matches raw usage (strict), or
+    - (customer_id, SKU, contract) matches raw usage for any tenant mapped to that customer
+      (relaxed), so one deduped row for the same SKU+contract can match usage on 324 or 284.
     
     Args:
         filtered_df: Filtered DataFrame from tabs_billing_terms_format
@@ -631,6 +639,18 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file, st=None):
             raw_usage_df['SKU Name'].str.lower(),
             raw_usage_df['Contract_normalized']
         ))
+
+        # Relaxed: same Tabs customer + SKU + contract from raw on any tenant (multi-account / deduped books)
+        tenant_to_customer_id = build_tenant_to_customer_id_map()
+        raw_customer_sku_contract = set()
+        for _, r in raw_usage_df.iterrows():
+            tid = str(r['Tenant ID'])
+            cid = tenant_to_customer_id.get(tid)
+            if cid is None:
+                continue
+            raw_customer_sku_contract.add(
+                (str(cid), str(r['SKU Name']).lower(), str(r['Contract_normalized']))
+            )
         
         # Make a copy of filtered_df to avoid modifying the original
         filtered_df_copy = filtered_df.copy()
@@ -652,17 +672,34 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file, st=None):
         debug(f"Unique Tenant IDs: {filtered_df_copy['tenant_id'].unique().tolist()[:10]}")
         debug(f"Unique Contracts (normalized): {filtered_df_copy['contract_name_normalized'].unique().tolist()[:10]}")
         
-        # Filter filtered_df to only include rows where (tenant_id, name, contract_name_normalized) matches
-        # any combination in the raw usage file (case-insensitive for SKU name, normalized for contract)
-        mask = filtered_df_copy.apply(
-            lambda row: (str(row['tenant_id']), str(row['name']).lower(), str(row.get('contract_name_normalized', ''))) in matching_tuples,
-            axis=1
+        # Strict: tenant + SKU + contract. Relaxed: customer_id + SKU + contract (any tenant for that customer).
+        def row_matches_raw(row):
+            tid = str(row['tenant_id'])
+            sku_l = str(row['name']).lower()
+            cnorm = str(row.get('contract_name_normalized', ''))
+            if (tid, sku_l, cnorm) in matching_tuples:
+                return True
+            cid = row.get('customer_id')
+            if cid is None or (isinstance(cid, float) and pd.isna(cid)):
+                return False
+            return (str(cid), sku_l, cnorm) in raw_customer_sku_contract
+
+        mask = filtered_df_copy.apply(row_matches_raw, axis=1)
+
+        strict_mask = filtered_df_copy.apply(
+            lambda row: (
+                str(row['tenant_id']),
+                str(row['name']).lower(),
+                str(row.get('contract_name_normalized', '')),
+            ) in matching_tuples,
+            axis=1,
         )
+        relaxed_only = mask & ~strict_mask
         
         debug("\n=== DEBUG: Matching Results ===")
         match_count = mask.sum()
         debug(f"Total rows: {len(filtered_df_copy)}")
-        debug(f"Matched: {match_count}")
+        debug(f"Matched: {match_count} (strict: {strict_mask.sum()}, relaxed-only: {relaxed_only.sum()})")
         debug(f"Unmatched: {len(filtered_df_copy) - match_count}")
         
         if match_count > 0:
@@ -680,7 +717,9 @@ def tabs_billing_terms_to_upload(filtered_df, raw_monthly_usage_file, st=None):
         # Create Tabs_bt_final_df with only matching rows
         Tabs_bt_clean_df = filtered_df_copy[mask].copy()
         
-        print(f"Matched {len(Tabs_bt_clean_df)} rows using (Tenant ID, SKU Name, Contract) matching")
+        print(
+            f"Matched {len(Tabs_bt_clean_df)} rows (strict tenant+SKU+contract and/or relaxed customer+SKU+contract)"
+        )
         
         return Tabs_bt_clean_df
         
@@ -1486,40 +1525,8 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
         # Get all customers from API to map tenant_id to Tabs Customer ID
         try:
             debug(f"\n=== Fetching Customers from API ===")
-            customers_data = get_all_customers()
-            debug(f"Fetched {len(customers_data)} customers from API")
-            
-            # Create mapping dictionary: tenant_id -> tabs_customer_id
-            tenant_to_customer_id = {}
-            for customer in customers_data:
-                tabs_customer_id = customer.get('id')
-                custom_fields = customer.get('customFields', [])
-                
-                # Find the Tenant ID custom field, fallback to Account # if not found
-                tenant_id_value = None
-                for field in custom_fields:
-                    field_name = field.get('customFieldName')
-                    if field_name == 'Tenant ID':
-                        tenant_id_value = field.get('customFieldValue')
-                        if tenant_id_value:
-                            tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
-                            break
-                
-                # If Tenant ID not found, try Account #
-                if not tenant_id_value:
-                    for field in custom_fields:
-                        if field.get('customFieldName') == 'Account #':
-                            account_value = field.get('customFieldValue')
-                            if account_value:
-                                # Handle multiple tenant IDs separated by + (e.g., "123 + 456")
-                                if '+' in str(account_value):
-                                    for part in str(account_value).split('+'):
-                                        part = part.strip()
-                                        if part:
-                                            tenant_to_customer_id[part] = tabs_customer_id
-                                else:
-                                    tenant_to_customer_id[str(account_value)] = tabs_customer_id
-                                break
+            tenant_to_customer_id = build_tenant_to_customer_id_map()
+            debug(f"Tenant ID mapping size: {len(tenant_to_customer_id)}")
             
             debug(f"\n=== Tenant ID Mapping Created ===")
             debug(f"Total mappings: {len(tenant_to_customer_id)}")
@@ -1795,39 +1802,7 @@ def create_tabs_ready_usage(raw_monthly_usage_file, tabs_bt_contract, enterprise
                             
                             # Get all customers from API to map Tenant ID to customer_id
                             try:
-                                customers_data = get_all_customers()
-                                
-                                # Create mapping: tenant_id -> tabs_customer_id
-                                tenant_to_customer_id = {}
-                                for customer in customers_data:
-                                    tabs_customer_id = customer.get('id')
-                                    custom_fields = customer.get('customFields', [])
-                                    
-                                    # Find the Tenant ID custom field, fallback to Account # if not found
-                                    tenant_id_value = None
-                                    for field in custom_fields:
-                                        field_name = field.get('customFieldName')
-                                        if field_name == 'Tenant ID':
-                                            tenant_id_value = field.get('customFieldValue')
-                                            if tenant_id_value:
-                                                tenant_to_customer_id[str(tenant_id_value)] = tabs_customer_id
-                                                break
-                                    
-                                    # If Tenant ID not found, try Account #
-                                    if not tenant_id_value:
-                                        for field in custom_fields:
-                                            if field.get('customFieldName') == 'Account #':
-                                                account_value = field.get('customFieldValue')
-                                                if account_value:
-                                                    # Handle multiple tenant IDs separated by + (e.g., "123 + 456")
-                                                    if '+' in str(account_value):
-                                                        for part in str(account_value).split('+'):
-                                                            part = part.strip()
-                                                            if part:
-                                                                tenant_to_customer_id[part] = tabs_customer_id
-                                                    else:
-                                                        tenant_to_customer_id[str(account_value)] = tabs_customer_id
-                                                    break
+                                tenant_to_customer_id = build_tenant_to_customer_id_map()
                                 
                                 # Create mapping: customer_id -> Enterprise Support %
                                 for _, row in enterprise_df.iterrows():
